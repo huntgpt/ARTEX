@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -161,6 +163,130 @@ func TestDualSupervisorRunsLeadsConcurrentlyOnIdenticalSnapshot(t *testing.T) {
 	}
 	if len(arbiter.captured()) != 1 {
 		t.Fatalf("arbiter calls=%d want 1", len(arbiter.captured()))
+	}
+}
+
+func TestSupervisorSnapshotCarriesCurrentPlatformWorkerAndApprovalState(t *testing.T) {
+	primary := &supervisorProbeProvider{text: `{"assessment":"read current runtime state","recommended_directions":[],"evidence_gaps":[],"conflicts_or_challenges":[],"stop_or_continue":"continue","blocking_conditions":[]}`}
+	secondary := &supervisorProbeProvider{text: `{"assessment":"independent runtime check","recommended_directions":[],"evidence_gaps":[],"conflicts_or_challenges":[],"stop_or_continue":"continue","blocking_conditions":[]}`}
+	arbiter := &supervisorProbeProvider{text: `{"consensus_summary":"use current enabled capabilities","selected_directions":[],"rejected_directions":[],"conflicts":[],"idle_slot_reasons":[],"planner_constraints":[]}`}
+	s, task, _, _, _ := createSupervisorRuntimeFixture(t, primary, secondary, arbiter)
+
+	oldCapture := s.m.TrafficEnabled()
+	oldBinding := s.m.PG().GetBool(settingAgentTrafficBinding, false)
+	if err := s.m.SetTrafficEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.PG().SetBool(settingAgentTrafficBinding, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = s.m.SetTrafficEnabled(oldCapture)
+		_ = s.m.PG().SetBool(settingAgentTrafficBinding, oldBinding)
+	})
+
+	openIntent, err := task.Store.AddIntent(map[string]any{"summary": "ready current work"}, 6, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runningIntent, err := task.Store.AddIntent(map[string]any{"summary": "live current work"}, 8, nil, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token, err := task.Store.ClaimIntentToken(runningIntent, "work#snapshot"); err != nil || token == "" {
+		t.Fatalf("claim token=%q err=%v", token, err)
+	}
+
+	pendingApproval, err := s.m.PG().CreateInterceptPending(0, 0, task.ID, "worker", "Bash", []byte(`{"password":"approval-secret-never-prompted"}`), "reason contains another-secret-never-prompted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deniedApproval, err := s.m.PG().CreateInterceptPending(0, 0, task.ID, "worker", "WebFetch", []byte(`{"authorization":"Bearer hidden-token-never-prompted"}`), "denied secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.m.PG().DecideInterceptPending(deniedApproval, "denied"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.m.PG().Exec(`DELETE FROM intercept_pending WHERE id IN ($1,$2)`, pendingApproval, deniedApproval)
+	})
+
+	findingNode, err := task.Store.AddNode(db.KindFinding, map[string]any{"summary": "finding without traffic proof"}, 9, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := mustTaskID(t, task.ID)
+	findingID, err := task.Store.AddStandaloneFinding(taskID, findingNode, "test", "binding distinction", "high", "finding", "evidence", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = s.m.PG().Exec(`DELETE FROM findings WHERE id=$1`, findingID) })
+
+	advice, err := s.runSupervisorCheckpoint(context.Background(), task, nil, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := primary.captured()
+	if len(requests) != 1 {
+		t.Fatalf("primary requests=%d want 1", len(requests))
+	}
+	rawSnapshot := requests[0].Messages[0].Text()
+	for _, forbidden := range []string{"approval-secret-never-prompted", "another-secret-never-prompted", "hidden-token-never-prompted"} {
+		if strings.Contains(rawSnapshot, forbidden) {
+			t.Fatalf("supervisor snapshot leaked approval secret %q", forbidden)
+		}
+	}
+	var snapshot struct {
+		RuntimeState map[string]any `json:"runtime_state"`
+	}
+	if err := json.Unmarshal([]byte(rawSnapshot), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	traffic := snapshot.RuntimeState["traffic_capture"].(map[string]any)
+	expectedRecorder := s.m.Traffic() != nil
+	if traffic["enabled"] != true || traffic["recorder_available"] != expectedRecorder || traffic["tools_available"] != expectedRecorder {
+		t.Fatalf("traffic state=%+v, want enabled with recorder availability=%v", traffic, expectedRecorder)
+	}
+	binding := snapshot.RuntimeState["agent_traffic_binding"].(map[string]any)
+	if binding["enabled"] != true || binding["bindings_total"].(float64) != 0 || binding["unbound_findings_total"].(float64) != 1 {
+		t.Fatalf("binding state=%+v, enabled must be distinct from zero bound proof", binding)
+	}
+	workers := snapshot.RuntimeState["workers"].(map[string]any)
+	counts := workers["intent_state_counts"].(map[string]any)
+	if counts["open"].(float64) < 1 || counts["running"].(float64) < 1 {
+		t.Fatalf("worker counts=%+v", counts)
+	}
+	intents := workers["current_intents"].([]any)
+	seenOpen, seenRunning := false, false
+	for _, raw := range intents {
+		intent := raw.(map[string]any)
+		id := int64(intent["intent_id"].(float64))
+		seenOpen = seenOpen || (id == openIntent && intent["state"] == "open")
+		seenRunning = seenRunning || (id == runningIntent && intent["state"] == "running" && intent["worker"] == "work#snapshot")
+	}
+	if !seenOpen || !seenRunning {
+		t.Fatalf("current intents omit ready/running state: %+v", intents)
+	}
+	approvals := snapshot.RuntimeState["approvals"].(map[string]any)
+	approvalCounts := approvals["status_counts"].(map[string]any)
+	if approvalCounts["pending"].(float64) != 1 || approvalCounts["denied"].(float64) != 1 {
+		t.Fatalf("approval counts=%+v", approvalCounts)
+	}
+
+	// The arbiter and returned Planner advice must receive the same scrubbed,
+	// immutable runtime object rather than re-reading settings after the leads.
+	if len(advice.RuntimeState) == 0 {
+		t.Fatal("Planner advice omitted authoritative runtime state")
+	}
+	arbiterRequests := arbiter.captured()
+	if len(arbiterRequests) != 1 || !strings.Contains(arbiterRequests[0].Messages[0].Text(), `"current_runtime_state"`) ||
+		!strings.Contains(arbiterRequests[0].Messages[0].Text(), `"agent_traffic_binding":{"bindings_total":0,"enabled":true`) {
+		t.Fatalf("arbiter did not receive authoritative runtime state: %+v", arbiterRequests)
+	}
+	var adviceRuntime map[string]any
+	if err := json.Unmarshal(advice.RuntimeState, &adviceRuntime); err != nil || adviceRuntime["traffic_capture"] == nil {
+		t.Fatalf("advice runtime=%s err=%v", advice.RuntimeState, err)
 	}
 }
 

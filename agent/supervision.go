@@ -16,6 +16,7 @@ type SupervisorAdvice struct {
 	RoundID       int64           `json:"round_id"`
 	SnapshotHash  string          `json:"snapshot_hash"`
 	State         string          `json:"state"`
+	RuntimeState  json.RawMessage `json:"runtime_state,omitempty"`
 	Primary       json.RawMessage `json:"primary,omitempty"`
 	Secondary     json.RawMessage `json:"secondary,omitempty"`
 	Decision      json.RawMessage `json:"decision,omitempty"`
@@ -42,7 +43,7 @@ func supervisorAdviceFrom(ctx context.Context) (SupervisorAdvice, bool) {
 // canonicalizes the result, persists it, then returns those exact safe bytes to
 // both providers. Callers must use the returned SupervisorRound.Snapshot rather
 // than sending this pre-persistence map directly.
-func BuildSupervisorSnapshot(taskID int64, goal string, as *db.AssetStore, ts *db.ExplorationStore, triggers []TriggerEvent, workerCapacity int) map[string]any {
+func BuildSupervisorSnapshot(taskID int64, goal string, as *db.AssetStore, ts *db.ExplorationStore, triggers []TriggerEvent, workerCapacity int, runtimeState ...map[string]any) map[string]any {
 	tools := NewToolSet(ts, "supervisor")
 	tools.SetTaskID(taskID)
 	tools.SetCoverageEnabled(coverageOn(as, taskID))
@@ -57,7 +58,7 @@ func BuildSupervisorSnapshot(taskID int64, goal string, as *db.AssetStore, ts *d
 			"new_goal": event.NewGoal, "hints": event.Hints, "hint_origin": event.HintOrigin,
 		})
 	}
-	return map[string]any{
+	snapshot := map[string]any{
 		"task_id":               taskID,
 		"goal":                  goal,
 		"operation_constraints": strings.TrimSpace(constraintBlock(ts)),
@@ -65,6 +66,10 @@ func BuildSupervisorSnapshot(taskID int64, goal string, as *db.AssetStore, ts *d
 		"trigger_events":        events,
 		"graph_overview":        tools.graphOverviewData(),
 	}
+	if len(runtimeState) > 0 && runtimeState[0] != nil {
+		snapshot["runtime_state"] = runtimeState[0]
+	}
+	return snapshot
 }
 
 func supervisorAdviceBlock(ctx context.Context, env dataEnvelope) string {
