@@ -50,6 +50,15 @@ func defaultTools(base string) []actool.CoreTool {
 	for _, t := range all {
 		if run, ok := confinedFileToolNames[t.Name()]; ok {
 			t = &confinedFileTool{CoreTool: t, base: base, run: run}
+		} else if t.Name() == "Bash" {
+			// Norma automatically moves a foreground Bash command into its
+			// background-task manager when the command reaches timeout. That is
+			// useful for builds and scanners, but a stalled request client (curl,
+			// wget, …) then survives the timeout and makes the agent poll
+			// TaskOutput indefinitely. Keep background execution for ordinary
+			// commands while forcing request clients through the synchronous,
+			// context-cancelled path with a short hard deadline.
+			t = boundedNetworkBash(t)
 		}
 		out = append(out, t)
 	}
