@@ -1188,6 +1188,46 @@ WHERE exploration_id = $1
 	return nodes, edges, edgeRows.Err()
 }
 
+// FindingEvidenceNodes returns the finding's ordinary ancestor lineage plus
+// direct follow-up intents explicitly derived from that finding. A follow-up is
+// included only when the graph contains the exact
+// finding --derived_from--> intent edge; arbitrary siblings and deeper
+// descendants are excluded. This bounded set lets a follow-up verification add
+// audited evidence to an existing finding without making every later branch of
+// the exploration graph part of that finding's evidence.
+func (s *ExplorationStore) FindingEvidenceNodes(nodeID int64) ([]*Node, error) {
+	rows, err := s.db.Query(`
+WITH RECURSIVE anc(id) AS (
+    SELECT n.id
+    FROM exploration_nodes n
+    WHERE n.exploration_id=$1 AND n.id=$2 AND n.kind='finding'
+  UNION
+    SELECT e.src_id
+    FROM exploration_edges e
+    JOIN anc ON e.dst_id=anc.id
+    WHERE e.exploration_id=$1
+), followup(id) AS (
+    SELECT e.dst_id
+    FROM exploration_edges e
+    JOIN exploration_nodes source ON source.id=e.src_id AND source.exploration_id=e.exploration_id
+    JOIN exploration_nodes intent ON intent.id=e.dst_id AND intent.exploration_id=e.exploration_id
+    WHERE e.exploration_id=$1 AND e.src_id=$2 AND e.rel=$3
+      AND source.kind='finding' AND intent.kind='intent'
+)
+SELECT `+nodeCols+`
+FROM exploration_nodes
+WHERE exploration_id=$1 AND id IN (
+    SELECT id FROM anc
+    UNION
+    SELECT id FROM followup
+)
+ORDER BY id`, s.expID, nodeID, RelDerivedFrom)
+	if err != nil {
+		return nil, err
+	}
+	return scanNodes(rows)
+}
+
 // FindingIntents maps each finding id to the intent that produced it (the
 // intent --yields--> finding edge; report_finding links it). Findings with no
 // producing intent are absent. Precise (JOIN, no edge-scan limit).
@@ -1498,7 +1538,10 @@ func (s *ExplorationStore) EvidenceActivities(nodeIDs []int64) ([]Activity, erro
 	rows, err := s.db.Query(`
 SELECT id,node_id,COALESCE(worker,''),COALESCE(kind,''),COALESCE(tool,''),COALESCE(tool_use_id,''),is_error,COALESCE(summary,''),COALESCE(detail,''),metadata,created_at
 FROM activity
-WHERE exploration_id=$1 AND node_id=ANY($2::bigint[]) AND metadata ? 'evidence_artifacts'
+WHERE exploration_id=$1 AND node_id=ANY($2::bigint[]) AND (
+    metadata ? 'evidence_artifacts'
+    OR (kind='tool_result' AND tool IN ('ingest_scan_output','ingest_browser_evidence','ingest_retest_browser_evidence') AND NULLIF(tool_use_id,'') IS NOT NULL)
+)
 ORDER BY created_at,id`, s.expID, nodeIDs)
 	if err != nil {
 		return nil, err

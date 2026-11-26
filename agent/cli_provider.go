@@ -324,16 +324,128 @@ func decodeCLIBridgeResponse(raw []byte) (cliBridgeResponse, error) {
 	if len(raw) > maxCLIBridgeOutput {
 		return cliBridgeResponse{}, errors.New("local CLI response exceeded size limit")
 	}
-	trimmed := strings.TrimSpace(string(raw))
-	trimmed = strings.TrimPrefix(trimmed, "```json")
-	trimmed = strings.TrimPrefix(trimmed, "```")
-	trimmed = strings.TrimSuffix(trimmed, "```")
-	trimmed = strings.TrimSpace(trimmed)
+	object, err := decodeSingleJSONObject(raw)
+	if err != nil {
+		return cliBridgeResponse{}, fmt.Errorf("local CLI returned invalid bridge JSON: %w", err)
+	}
 	var response cliBridgeResponse
-	if err := json.Unmarshal([]byte(trimmed), &response); err != nil {
+	if err := json.Unmarshal(object, &response); err != nil {
 		return cliBridgeResponse{}, fmt.Errorf("local CLI returned invalid bridge JSON: %w", err)
 	}
 	return response, nil
+}
+
+// decodeSingleJSONObject accepts the small amount of presentation noise that
+// coding CLIs sometimes add around structured output (a sentence or a Markdown
+// fence), while keeping the bridge fail closed. Exactly one complete JSON
+// object must be present. Arrays, partial objects, and multiple objects are
+// rejected so the parser can never guess which tool call the model intended.
+// One extra JSON-string layer is accepted because some CLI versions serialize
+// an already-encoded structured response.
+func decodeSingleJSONObject(raw []byte) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, errors.New("empty response")
+	}
+
+	for unwrap := 0; unwrap < 2; unwrap++ {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &object); err == nil && object != nil {
+			return json.RawMessage(trimmed), nil
+		}
+		if unwrap == 0 {
+			var encoded string
+			if err := json.Unmarshal(trimmed, &encoded); err == nil {
+				trimmed = bytes.TrimSpace([]byte(encoded))
+				if len(trimmed) == 0 {
+					return nil, errors.New("empty encoded response")
+				}
+				continue
+			}
+		}
+		break
+	}
+	// A syntactically valid non-object value is not presentation noise. Reject it
+	// before envelope scanning so an object nested in an array cannot be promoted
+	// into a top-level tool call.
+	if json.Valid(trimmed) {
+		return nil, errors.New("JSON value is not an object")
+	}
+
+	candidates, malformed := jsonObjectCandidates(trimmed)
+	if malformed {
+		return nil, errors.New("response contains an incomplete or unmatched JSON object")
+	}
+	if len(candidates) != 1 {
+		return nil, fmt.Errorf("response contains %d complete JSON objects; exactly one is required", len(candidates))
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(candidates[0], &object); err != nil || object == nil {
+		if err == nil {
+			err = errors.New("JSON value is not an object")
+		}
+		return nil, err
+	}
+	return json.RawMessage(candidates[0]), nil
+}
+
+// jsonObjectCandidates finds top-level object envelopes without treating
+// braces inside JSON strings (for example Bash commands) as structure.
+func jsonObjectCandidates(raw []byte) ([][]byte, bool) {
+	var candidates [][]byte
+	start, depth, arrayDepth := -1, 0, 0
+	inString, escaped := false, false
+	malformed := false
+	for i, b := range raw {
+		if depth == 0 {
+			switch b {
+			case '{':
+				if arrayDepth != 0 {
+					malformed = true
+				} else {
+					start, depth = i, 1
+					inString, escaped = false, false
+				}
+			case '[':
+				arrayDepth++
+			case ']':
+				if arrayDepth == 0 {
+					malformed = true
+				} else {
+					arrayDepth--
+				}
+			case '}':
+				malformed = true
+			}
+			continue
+		}
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch b {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				candidates = append(candidates, raw[start:i+1])
+				start = -1
+			}
+		}
+	}
+	return candidates, malformed || depth != 0 || arrayDepth != 0 || inString || escaped
 }
 
 func normalizeCLIBridgeResponse(response cliBridgeResponse, tools []llm.ToolSchema) (llm.Message, string, error) {
@@ -349,12 +461,12 @@ func normalizeCLIBridgeResponse(response cliBridgeResponse, tools []llm.ToolSche
 		if !allowed[call.Name] {
 			return llm.Message{}, "", fmt.Errorf("local CLI selected unknown ARTEX tool %q", call.Name)
 		}
-		input := json.RawMessage(strings.TrimSpace(call.InputJSON))
-		if len(input) == 0 {
+		var input json.RawMessage
+		if strings.TrimSpace(call.InputJSON) == "" {
 			input = json.RawMessage(`{}`)
-		}
-		var object map[string]any
-		if err := json.Unmarshal(input, &object); err != nil {
+		} else if decoded, err := decodeSingleJSONObject([]byte(call.InputJSON)); err == nil {
+			input = decoded
+		} else {
 			return llm.Message{}, "", fmt.Errorf("local CLI tool %q returned invalid input JSON", call.Name)
 		}
 		id := strings.TrimSpace(call.ID)

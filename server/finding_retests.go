@@ -186,6 +186,8 @@ func (s *Server) findingRetestTools() []actool.CoreTool {
 				}
 				return jsonResult(map[string]any{"saved": true, "verdict": a.Verdict})
 			}),
+		s.toolCaptureRetestPlaywrightEvidence(),
+		s.toolIngestRetestBrowserEvidence(),
 	}
 }
 

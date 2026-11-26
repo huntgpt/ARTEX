@@ -698,6 +698,12 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.ingestBbot(),
 		// scanner output (nmap -oX) by path, without the raw output.
 		t.ingestScanOutput(),
+		// Code-owned Chromium navigation creates the signed provenance receipt;
+		// raw PNG/JPEG files cannot self-assert that they came from Playwright.
+		t.capturePlaywrightEvidence(),
+		// Original Playwright PNG/JPEG plus an optional JSON/HAR network trace,
+		// copied byte-for-byte into the server-owned evidence store with hashes.
+		t.ingestBrowserEvidence(),
 		// Non-plaintext secret-vault inventory for reconciling scanner imports.
 		t.listDiscoveredSecrets(),
 		// Operator-supplied AD collector output. Catalogued but deliberately

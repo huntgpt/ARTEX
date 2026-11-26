@@ -861,8 +861,7 @@ export const api = {
         dependencies: arr(phase.dependencies),
       })),
     })),
-  taskSupervisor: (id: string) =>
-    get<import("@/lib/types").TaskSupervisorConfig>(`/tasks/${id}/supervisor`),
+  taskSupervisor: (id: string) => get<import("@/lib/types").TaskSupervisorConfig>(`/tasks/${id}/supervisor`),
   setTaskSupervisor: (id: string, config: import("@/lib/types").TaskSupervisorConfig) =>
     put<import("@/lib/types").TaskSupervisorConfig>(`/tasks/${id}/supervisor`, config),
   taskSupervisorRounds: (id: string, limit = 20) =>
@@ -871,8 +870,7 @@ export const api = {
         items: arr(r.items).map((round) => ({ ...round, reviews: arr(round.reviews) })),
       }),
     ),
-  runTaskSupervisor: (id: string) =>
-    post<import("@/lib/types").SupervisorAdvice>(`/tasks/${id}/supervisor/run`),
+  runTaskSupervisor: (id: string) => post<import("@/lib/types").SupervisorAdvice>(`/tasks/${id}/supervisor/run`),
   transitionRedTeamPhase: (
     id: string,
     phase: string,
@@ -882,6 +880,8 @@ export const api = {
       tool?: string;
       current_result?: string;
       blocker_reason?: string;
+      blocker_kind?: "dependency" | "evidence" | "operational";
+      blocker_source?: string;
     },
   ) =>
     post<{ phases: import("@/lib/types").RedTeamPhaseRun[] }>(

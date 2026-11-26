@@ -376,16 +376,24 @@ func (d *DB) EditFindingTraffic(ctx context.Context, findingID, bindingID, versi
 }
 
 type RecordFindingInput struct {
-	TaskID, ExplorationID, IntentID                      int64
+	TaskID, ExplorationID, IntentID int64
+	// ExistingFindingID explicitly extends a finding in the same task.  The
+	// report_finding tool accepts both existing_finding_id and the legacy-friendly
+	// finding_id alias and resolves them into this field before storage.
+	ExistingFindingID                                    int64
 	VulnClass, Name, Severity, Summary, Evidence, Worker string
 	Counterevidence, ConfidenceRationale                 string // optional; "" = not given
 	AssetIDs                                             []int64
+	// SkipDuplicateCheck is used by report_finding(force_register=true).  It only
+	// bypasses automatic matching; an explicit ExistingFindingID still wins.
+	SkipDuplicateCheck bool
 }
 
 type RecordedFinding struct {
-	FindingID int64           `json:"finding_id,string"`
-	NodeID    int64           `json:"finding_node_id,string"`
-	Traffic   *FindingTraffic `json:"traffic"`
+	FindingID      int64           `json:"finding_id,string"`
+	NodeID         int64           `json:"finding_node_id,string"`
+	Traffic        *FindingTraffic `json:"traffic"`
+	ReusedExisting bool            `json:"reused_existing,omitempty"`
 }
 
 // ctx is passed in by the caller for this transaction (rather than taking
@@ -413,6 +421,14 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 		if !ok {
 			return nil, errors.New("intent_id must be an intent of this task (intents of associated tasks are read-only)")
 		}
+	}
+	// Do this after the task/intent validation and while the task row is locked.
+	// Concurrent report_finding calls for one task therefore cannot both observe
+	// an empty candidate set and create duplicate rows.
+	if out, reused, err := reuseExistingFindingTx(ctx, tx, in, prepared); err != nil {
+		return nil, err
+	} else if reused {
+		return out, nil
 	}
 	payload, _ := json.Marshal(map[string]any{"vulnclass": in.VulnClass, "name": in.Name, "severity": in.Severity, "summary": in.Summary, "evidence": map[string]any{"by": in.Worker, "poc": in.Evidence}})
 	out := &RecordedFinding{}

@@ -82,9 +82,10 @@ Finding quality gates (proof standard, measured impact, testing bounds):
 - **Testing bounds** (bounded and non-destructive does NOT mean read-only): state-changing requests are in bounds when they are the finding's mechanism. Prove the mechanism on your own objects/accounts first, then confirm cross-entity reach on at most three non-owned objects with the smallest request that demonstrates the boundary; prefer reversible values, restore originals where possible, and record every touched object ID in the evidence.
 - **Priority discipline**: low-impact oracles (user/account enumeration, account-existence checks, response-timing differences) and low-yield misconfigurations (permissive CORS) are not standalone findings; record them only when they directly chain into account takeover, authentication bypass, or mass data exposure.
 
-Operator handoff on environmental blocks:
-- When a command or tool fails for an environmental reason (a sandboxed or filtered network path, a missing binary or key, TLS or proxy interception, a permission this runtime lacks), stop after the first failure: do not retry with different flags, do not switch tools hunting for a bypass, and do not fall through to an equivalent command.
-- Call ask_operator with the exact single command the operator should run in their own terminal: one line, copy-pastable, followed by what to paste back. One command per request; never batch. Wait for the reply instead of burning turns.`
+Environmental failure handling:
+- A transient network-path failure (proxy CONNECT timeout, HTTP status 000, connection/TLS-handshake timeout, network unreachable) is not a human-input request. Retry the exact same bounded probe at most once, without changing flags, switching tools, or hunting for a bypass (two total attempts maximum).
+- If both attempts fail, do not call ask_operator. Write one record_fact and finish this route normally. Make the fact machine-readable: summary begins with "[environmental_blocker]"; detail includes blocker_type=network_environment, target, attempts=2, the exact last_error, retryable=true, and operator_action=none; evidence includes the attempted command and error; source=tool_output.
+- Use ask_operator only when a specific human-only input or action can actually unblock this route now (for example captcha, OTP, approval, a credential/key the operator controls, or an explicit configuration change). State the one precise action or value needed. Never ask the operator merely to repeat a failed network probe in another terminal.`
 
 // DefaultAssistantPrompt is the starter/fallback body for CUSTOM conversational
 // agents — they have no per-key in-code default. It is seeded into agent_prompts

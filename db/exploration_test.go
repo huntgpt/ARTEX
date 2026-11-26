@@ -87,6 +87,44 @@ func TestExplorationFlow(t *testing.T) {
 		t.Fatalf("lineage edges: want i2-yields->find, got %+v", lnEdges)
 	}
 
+	// Evidence adds only a direct, explicitly derived follow-up intent. Its
+	// descendants and unrelated branches must not become finding evidence.
+	followup, err := es.AddIntent(map[string]any{"summary": "verify existing finding"}, 10, nil, "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := es.Link(find, RelDerivedFrom, followup); err != nil {
+		t.Fatal(err)
+	}
+	deepFact, err := es.AddNode(KindFact, map[string]any{"summary": "follow-up output"}, 0, "confirmed", "worker-2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := es.Link(followup, RelYields, deepFact); err != nil {
+		t.Fatal(err)
+	}
+	wrongKind, err := es.AddNode(KindFact, map[string]any{"summary": "not a follow-up intent"}, 0, "confirmed", "worker-2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := es.Link(find, RelDerivedFrom, wrongKind); err != nil {
+		t.Fatal(err)
+	}
+	evidenceNodes, err := es.FindingEvidenceNodes(find)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceSet := map[int64]bool{}
+	for _, n := range evidenceNodes {
+		evidenceSet[n.ID] = true
+	}
+	if len(evidenceSet) != 3 || !evidenceSet[i2] || !evidenceSet[find] || !evidenceSet[followup] {
+		t.Fatalf("evidence nodes: want {i2,find,followup}, got %+v", evidenceNodes)
+	}
+	if evidenceSet[deepFact] || evidenceSet[wrongKind] || evidenceSet[goal] {
+		t.Fatalf("evidence nodes admitted a descendant/non-intent/downstream goal: %+v", evidenceNodes)
+	}
+
 	// activity poll by id cursor
 	id1, err := es.AppendActivity(Activity{Worker: "worker-1", Kind: "tool_use", Tool: "Bash", Summary: "ran curl", Detail: "full output"})
 	if err != nil {
@@ -111,7 +149,10 @@ func TestExplorationFlow(t *testing.T) {
 
 	// stats
 	st, _ := es.Stats()
-	if st["intent"] != 2 || st["goal"] != 1 || st["finding"] != 1 {
+	// The direct finding follow-up is a third intent. The two fact nodes are
+	// deliberate fixtures proving that descendants/non-intents stay excluded
+	// from the finding's explicit evidence set.
+	if st["intent"] != 3 || st["goal"] != 1 || st["finding"] != 1 || st["fact"] != 2 {
 		t.Fatalf("stats: %+v", st)
 	}
 }

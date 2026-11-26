@@ -713,6 +713,9 @@ func TestNewDefaultWorkers(t *testing.T) {
 	if e == nil {
 		t.Fatal("New returned nil")
 	}
+	if e.resolv != nil {
+		t.Fatal("nil asset store initialized a public DNS resolver")
+	}
 	e.Close()
 }
 

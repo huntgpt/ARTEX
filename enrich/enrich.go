@@ -68,15 +68,19 @@ func New(as *db.AssetStore, proxy func() string, workers int) *Engine {
 	if workers <= 0 {
 		workers = 4
 	}
-	resolv, err := dnsx.New(dnsx.Options{
-		BaseResolvers: dnsx.DefaultResolvers,
-		MaxRetries:    3,
-		QuestionTypes: []uint16{dns.TypeA, dns.TypeAAAA, dns.TypeCNAME},
-		Timeout:       4 * time.Second,
-	})
-	if err != nil {
-		slog.Warn("[enrich] dnsx init failed, DNS resolution disabled", "err", err)
-		resolv = nil
+	var resolv *dnsx.DNSX
+	if as != nil {
+		var err error
+		resolv, err = dnsx.New(dnsx.Options{
+			BaseResolvers: dnsx.DefaultResolvers,
+			MaxRetries:    3,
+			QuestionTypes: []uint16{dns.TypeA, dns.TypeAAAA, dns.TypeCNAME},
+			Timeout:       4 * time.Second,
+		})
+		if err != nil {
+			slog.Warn("[enrich] dnsx init failed, DNS resolution disabled", "err", err)
+			resolv = nil
+		}
 	}
 	e := &Engine{
 		as:     as,

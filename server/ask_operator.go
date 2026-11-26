@@ -22,6 +22,12 @@ import (
 
 const askOperatorMaxImage = 10 << 20
 
+// legacyAskOperatorEnvHandoffDescription is the code default shipped before
+// environmental network failures became autonomous blocker facts. It is kept
+// only so the one-time catalog migration can distinguish the old default from
+// an operator-edited description.
+const legacyAskOperatorEnvHandoffDescription = "Ask the human operator for input you cannot obtain yourself (a captcha solution, an email/SMS OTP code, a 2FA answer, a decision, or an action only they can perform). The question appears in this intent's chat for the operator, optionally with a screenshot, and this intent then pauses; the operator's reply resumes this run with the answer as your next input. Ask precisely, and only when you are genuinely blocked. When the block is environmental (a sandboxed or filtered network path, a missing binary or key, a proxy or TLS failure this runtime cannot fix), do not retry or work around it: include in the question the exact single command the operator should run in their own terminal, as one copy-pastable line, plus what to paste back, then wait."
+
 var askOperatorImageExt = map[string]bool{".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".gif": true}
 
 // toolAskOperator lets a worker formally request operator input (captcha, OTP,
@@ -31,7 +37,7 @@ var askOperatorImageExt = map[string]bool{".png": true, ".jpg": true, ".jpeg": t
 // resumes the run with the answer as the next input (#41).
 func (s *Server) toolAskOperator() actool.CoreTool {
 	return wrTool("ask_operator",
-		"Ask the human operator for input you cannot obtain yourself (a captcha solution, an email/SMS OTP code, a 2FA answer, a decision, or an action only they can perform). The question appears in this intent's chat for the operator, optionally with a screenshot, and this intent then pauses; the operator's reply resumes this run with the answer as your next input. Ask precisely, and only when you are genuinely blocked. When the block is environmental (a sandboxed or filtered network path, a missing binary or key, a proxy or TLS failure this runtime cannot fix), do not retry or work around it: include in the question the exact single command the operator should run in their own terminal, as one copy-pastable line, plus what to paste back, then wait.",
+		"Ask the human operator only for a human-only input or action that can actually unblock this intent now (a captcha solution, an email/SMS OTP code, a 2FA answer, an approval, a credential/key the operator controls, or an explicit configuration change). The question appears in this intent's chat for the operator, optionally with a screenshot, and this intent then pauses; the operator's reply resumes this run with the answer as your next input. A proxy CONNECT timeout, HTTP status 000, connection/TLS-handshake timeout, or unreachable network path is not a human-input request: retry the exact bounded probe once, then record one [environmental_blocker] fact and finish normally. Never ask the operator merely to repeat a failed network probe in another terminal.",
 		map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -55,6 +61,9 @@ func (s *Server) toolAskOperator() actool.CoreTool {
 			q := strings.TrimSpace(req.Question)
 			if q == "" {
 				return actool.Errorf("Error: question is required"), nil
+			}
+			if automaticEnvironmentalNetworkBlock(q) {
+				return actool.Text("Environmental network handoff was not delivered and this intent remains active. If this was the first failure, retry the exact same bounded probe once. After two failures, call record_fact once with a summary beginning [environmental_blocker] and detail fields blocker_type=network_environment, target, attempts=2, exact last_error, retryable=true, operator_action=none; include the command/error as evidence with source=tool_output, then finish the intent. Do not call ask_operator for this failure."), nil
 			}
 			ri := agent.RunInfoFrom(ctx)
 			if ri.TaskID == 0 || ri.IntentID == 0 {
@@ -81,6 +90,36 @@ func (s *Server) toolAskOperator() actool.CoreTool {
 			}
 			return actool.Text("Question delivered to the operator. This intent is pausing now: finish your current step, record everything you already know as facts, and stop. The operator's reply will resume this run and arrive as your next input."), nil
 		})
+}
+
+// automaticEnvironmentalNetworkBlock identifies questions that try to hand a
+// failed network probe to the human operator. These failures are retryable
+// machine state, not missing human input: pausing them creates an unbounded pile
+// of operator waits while otherwise-independent worker lanes sit idle. The
+// worker gets one identical retry and then records a structured blocker fact.
+// Keep this deliberately narrower than generic words such as "permission" or
+// "key": those may describe a real operator-controlled action.
+func automaticEnvironmentalNetworkBlock(question string) bool {
+	q := strings.ToLower(question)
+	for _, marker := range []string{
+		"proxy connect",
+		"http_status=000",
+		"http status 000",
+		"curl: (28)",
+		"connection timed out",
+		"connect timed out",
+		"connect timeout",
+		"tls handshake timeout",
+		"i/o timeout",
+		"network is unreachable",
+		"no route to host",
+		"failed to connect",
+	} {
+		if strings.Contains(q, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // commandTargets reads the network targets of a free text with the gate's

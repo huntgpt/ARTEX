@@ -53,7 +53,7 @@ func (s *Server) findingArtifacts(id int64) ([]findingArtifactDTO, error) {
 	if task == nil {
 		return []findingArtifactDTO{}, nil
 	}
-	nodes, _, err := task.Store.FindingLineage(*finding.NodeID)
+	nodes, err := task.Store.FindingEvidenceNodes(*finding.NodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +73,14 @@ func (s *Server) findingArtifacts(id int64) ([]findingArtifactDTO, error) {
 			Artifacts []agent.EvidenceArtifact `json:"evidence_artifacts"`
 		}
 		if json.Unmarshal(activity.Metadata, &metadata) != nil {
-			continue
+			metadata.Artifacts = nil
+		}
+		// Compatibility path for audited scanner/browser-ingest results recorded
+		// before captureRunSession understood Norma's nonce-bound output frame.
+		// The parser remains restricted to code-owned ingest tools and the file,
+		// SHA and exact-result declaration are validated below.
+		if len(metadata.Artifacts) == 0 {
+			metadata.Artifacts = agent.EvidenceArtifactsFromToolResult(activity.Tool, activity.Detail)
 		}
 		for _, artifact := range metadata.Artifacts {
 			if !validEvidenceArtifact(activity, artifact) ||
@@ -128,13 +135,30 @@ func validEvidenceArtifact(activity db.Activity, artifact agent.EvidenceArtifact
 		raw := sha256.Sum256([]byte(activity.Detail))
 		return hex.EncodeToString(raw[:]) == artifact.RawOutputSHA256
 	case "browser_screenshot":
-		if activity.Tool != "ingest_scan_output" || artifact.Tool != "gowitness" ||
+		// A failed importer call may contain diagnostic text shaped by a file or
+		// target response. Only a successful audited import can attest that the
+		// server confined, decoded, hashed, and persisted the original image.
+		if activity.IsError {
+			return false
+		}
+		expectedTool := ""
+		switch activity.Tool {
+		case "ingest_scan_output":
+			expectedTool = "gowitness"
+		case "ingest_browser_evidence", "ingest_retest_browser_evidence":
+			expectedTool = "playwright"
+		}
+		if expectedTool == "" || artifact.Tool != expectedTool ||
 			artifact.RawOutputSHA256 != "" || artifact.Command != "" ||
 			artifact.OriginalName == "" || artifact.OriginalName != filepath.Base(artifact.OriginalName) {
 			return false
 		}
 		switch artifact.MIMEType {
-		case "image/png", "image/jpeg", "image/webp":
+		case "image/png", "image/jpeg":
+		case "image/webp":
+			if expectedTool != "gowitness" {
+				return false
+			}
 		default:
 			return false
 		}
@@ -142,7 +166,7 @@ func validEvidenceArtifact(activity db.Activity, artifact agent.EvidenceArtifact
 		if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 			return false
 		}
-		return artifactDeclaredInToolResult(activity.Detail, artifact)
+		return artifactDeclaredInToolResult(activity.Tool, activity.Detail, artifact)
 	default:
 		return false
 	}
@@ -157,14 +181,8 @@ func shellEvidenceActivityTool(name string) bool {
 	}
 }
 
-func artifactDeclaredInToolResult(detail string, artifact agent.EvidenceArtifact) bool {
-	var envelope struct {
-		Artifacts []agent.EvidenceArtifact `json:"artifacts"`
-	}
-	if json.Unmarshal([]byte(detail), &envelope) != nil {
-		return false
-	}
-	for _, declared := range envelope.Artifacts {
+func artifactDeclaredInToolResult(sourceTool, detail string, artifact agent.EvidenceArtifact) bool {
+	for _, declared := range agent.EvidenceArtifactsFromToolResult(sourceTool, detail) {
 		if declared == artifact {
 			return true
 		}

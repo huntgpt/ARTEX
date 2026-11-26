@@ -22,7 +22,14 @@ func TestDomainToolsDeclareNoTarget(t *testing.T) {
 		t.Fatal("control: the input names targets, and an unknown tool is scanned")
 	}
 	for _, seed := range seeds {
-		if targets := intercept.ExtractTargets(seed.Key, input); len(targets) != 0 {
+		targets := intercept.ExtractTargets(seed.Key, input)
+		if seed.Key == "capture_playwright_evidence" {
+			if len(targets) == 0 {
+				t.Errorf("%s: targetful browser capture was not scanned", seed.Key)
+			}
+			continue
+		}
+		if len(targets) != 0 {
 			t.Errorf("%s: the gate reads targets %+v from a domain tool", seed.Key, targets)
 		}
 	}

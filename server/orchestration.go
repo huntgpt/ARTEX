@@ -551,6 +551,7 @@ func (s *Server) seedOrchestrationTools() {
 		_ = s.m.PG().SeedTool(t.Name(), t.Description(), schema, bindings)
 	}
 	s.refreshBuiltinToolSchemas()
+	s.refreshAskOperatorContract()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
 	s.seedPlannerListAssetsBinding()
@@ -693,6 +694,35 @@ func (s *Server) refreshBuiltinToolSchemas() {
 	log.Printf("[tools] refreshed orchestration/platform tool schemas to code defaults (one-time)")
 }
 
+// refreshAskOperatorContract updates only the model-facing description of the
+// already-seeded system tool. SeedTool intentionally preserves existing rows,
+// but the old description explicitly instructed workers to pause every proxy or
+// network timeout. Keep operator-edited descriptions, schema, enabled state,
+// and agent bindings untouched.
+func (s *Server) refreshAskOperatorContract() {
+	const flag = "ask_operator_environmental_blocker_contract_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	var desc string
+	for _, tool := range s.platformTools() {
+		if tool.Name() == "ask_operator" {
+			desc = tool.Description()
+			break
+		}
+	}
+	if desc == "" {
+		return
+	}
+	if _, err := s.m.pg.Exec(`UPDATE tools SET description=$2, updated_at=now() WHERE key=$1 AND system AND description=$3`, "ask_operator", desc, legacyAskOperatorEnvHandoffDescription); err != nil {
+		log.Printf("[tools] refresh ask_operator contract failed: %v", err)
+		return
+	}
+	if err := s.m.pg.SetSetting(flag, "true"); err != nil {
+		log.Printf("[tools] record ask_operator contract refresh failed: %v", err)
+	}
+}
+
 // unbindGoalMetDefault removes goal_met's default "planner" binding ONCE (guarded by
 // a settings flag), so existing DBs match the new default of NO agent. goal_met bypasses
 // per-goal prove_goal to declare the whole task done — powerful/risky and redundant with
@@ -801,13 +831,14 @@ func (s *Server) reseedPlannerPrompt() {
 	log.Printf("[prompts] planner prompt: appended a new default version (adds hash-verified terminal/browser evidence acceptance to intent planning, one-time)")
 }
 
-// reseedWorkerPrompt refreshes the worker prompt to [the current code default] — the record_fact section of the default body dropped the whole "for negative conclusions,
-// write observations + tentative readings" sentence and decoupled confidence (observed/inferred) from "whether this intent's options are exhausted" (these easily mislead the planner),
-// and tightened per-item facts arrays to the rare exception of "fully independent of each other, impossible to merge". Bumped the flag to v3 so existing old DBs refresh once more.
+// reseedWorkerPrompt refreshes the worker prompt to [the current code default].
+// Version 6 replaces per-intent environmental-network operator handoffs with
+// one identical bounded retry followed by a structured blocker fact, so an
+// unreachable host cannot park a worker intent indefinitely.
 // SeedPromptIfEmpty is first-insert-only; versions already in old DBs never got it, so version management [appends a new version] and switches to it; old versions stay in history and can be recovered.
 // settings flag guard → done only once. Fresh DBs need nothing. Structurally identical to reseedGoalsPrompt.
 func (s *Server) reseedWorkerPrompt() {
-	const flag = "worker_prompt_secret_bundle_semantics_v5"
+	const flag = "worker_prompt_environmental_blocker_semantics_v6"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -828,7 +859,7 @@ func (s *Server) reseedWorkerPrompt() {
 		log.Printf("[prompts] failed to refresh worker prompt to the new default: %v", err)
 		return
 	}
-	log.Printf("[prompts] worker prompt: appended a new default version (context-lookup section narrowed to list_assets/list_findings, dropping list_facts/node_detail/asset_neighbors, one-time)")
+	log.Printf("[prompts] worker prompt: appended a new default version (bounded network retry plus structured environmental-blocker facts replace operator handoff, one-time)")
 }
 
 // reporterToolCallMessage must unconditionally require reading get_finding_traffic once before writing the report.

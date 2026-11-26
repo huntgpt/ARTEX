@@ -145,9 +145,9 @@ func assertEmbeddedApplied(t *testing.T, d *DB) []appliedMigration {
 		{15, "0015_ad_exploration_graph.sql"}, {16, "0016_local_cli_profiles.sql"},
 		{17, "0017_ad_collection_runs.sql"}, {18, "0018_discovered_secrets.sql"}, {19, "0019_red_team_workflow.sql"}, {20, "0020_extended_ad_attack_paths.sql"},
 		{21, "0021_codex_cyber_access_program.sql"}, {22, "0022_claude_oauth_token_file.sql"}, {23, "0023_planner_todos.sql"},
-		{24, "0024_dual_lead_supervision.sql"}, {25, "0025_supervisor_snapshot_security.sql"}}
+		{24, "0024_dual_lead_supervision.sql"}, {25, "0025_supervisor_snapshot_security.sql"}, {26, "0026_red_team_phase_blocker_provenance.sql"}}
 	if len(applied) != len(want) {
-		t.Fatalf("schema_migrations = %+v, want versions 1 to 25", applied)
+		t.Fatalf("schema_migrations = %+v, want versions 1 to 26", applied)
 	}
 	for i, w := range want {
 		content, err := fs.ReadFile(migrationsFS(), w.name)
@@ -542,7 +542,10 @@ func TestSupervisorSnapshotSecurityMigrationRedactsExistingRows(t *testing.T) {
 	for _, query := range []string{
 		`UPDATE supervisor_rounds SET snapshot='{"goal":"password=legacy-plaintext"}'::jsonb,snapshot_hash='` + legacyHash + `' WHERE id=` + fmt.Sprint(round.ID),
 		`ALTER TABLE supervisor_rounds DROP COLUMN legacy_snapshot_hash`,
-		`DELETE FROM schema_migrations WHERE version=25`,
+		// Migration 0026 depends on tables/columns already present after 0025.
+		// A pre-0025 fixture must not claim a newer migration is applied ahead
+		// of the migration it is intentionally exercising.
+		`DELETE FROM schema_migrations WHERE version>=25`,
 	} {
 		if _, err := d.Exec(query); err != nil {
 			d.Close()

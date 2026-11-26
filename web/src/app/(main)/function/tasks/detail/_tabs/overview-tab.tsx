@@ -46,6 +46,7 @@ import type {
   NewAssetType,
   RedTeamPhaseRun,
   Stats,
+  SupervisorRound,
   Task,
   TaskConstraint,
   TaskGoal,
@@ -54,7 +55,6 @@ import type {
   TaskSupervisorCheckpointPolicy,
   TaskSupervisorConfig,
   TaskSupervisorMode,
-  SupervisorRound,
 } from "@/lib/types";
 
 // Compact token count formatting (12345 → 12.3k, 2000000 → 2M).
@@ -277,10 +277,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const loadSupervisorState = React.useCallback(
     async (replaceDraft = false) => {
       try {
-        const [config, rounds] = await Promise.all([
-          api.taskSupervisor(taskId),
-          api.taskSupervisorRounds(taskId, 10),
-        ]);
+        const [config, rounds] = await Promise.all([api.taskSupervisor(taskId), api.taskSupervisorRounds(taskId, 10)]);
         setSupervisorConfig(config);
         setSupervisorRounds(rounds.items);
         if (replaceDraft || !supervisorDraftDirty.current) {
@@ -668,9 +665,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 id="task-supervisor-mode"
                 value={supervisorDraft?.mode ?? "off"}
                 disabled={supervisorBusy}
-                onChange={(event) =>
-                  changeSupervisorDraft({ mode: event.target.value as TaskSupervisorMode })
-                }
+                onChange={(event) => changeSupervisorDraft({ mode: event.target.value as TaskSupervisorMode })}
               >
                 <NativeSelectOption value="off">{t("Off — Planner only")}</NativeSelectOption>
                 <NativeSelectOption value="single">{t("Single project lead")}</NativeSelectOption>
@@ -744,9 +739,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             {latestSupervisorRound ? (
               <div className="flex flex-col gap-3">
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                  <span className="font-medium">
-                    {t("Review round #{id}", { id: latestSupervisorRound.id })}
-                  </span>
+                  <span className="font-medium">{t("Review round #{id}", { id: latestSupervisorRound.id })}</span>
                   <span className="text-muted-foreground">
                     {t("Trigger")}: {latestSupervisorRound.trigger_kind}
                   </span>
@@ -1391,9 +1384,17 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                     <p className="mt-1 line-clamp-2 text-muted-foreground text-xs">{phase.current_result}</p>
                   ) : null}
                   {phase.blocker_reason ? (
-                    <p className="mt-1 rounded bg-destructive/5 px-2 py-1 text-destructive text-xs">
-                      {t("Blocked reason")}: {phase.blocker_reason}
-                    </p>
+                    <div className="mt-1 rounded bg-destructive/5 px-2 py-1 text-destructive text-xs">
+                      <p>
+                        {t("Blocked reason")}: {phase.blocker_reason}
+                      </p>
+                      {phase.blocker_source ? (
+                        <p className="mt-0.5 opacity-80">
+                          {t("Source")}: {phase.blocker_kind ? `${phase.blocker_kind} · ` : ""}
+                          {phase.blocker_source}
+                        </p>
+                      ) : null}
+                    </div>
                   ) : null}
                   {(phase.dependencies ?? []).length > 0 ? (
                     <p className="mt-1 truncate text-muted-foreground text-[11px]">

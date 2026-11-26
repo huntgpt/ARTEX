@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -400,14 +401,57 @@ func TestAskOperatorActivityTag(t *testing.T) {
 	}
 }
 
-// The tool description must tell agents what to do on environmental blocks:
-// hand the operator one copy-pastable command instead of retrying or hunting
-// for bypasses. Pattern adapted from bug-bounty-hunting-prompts (MIT).
-func TestAskOperatorEnvHandoffGuidance(t *testing.T) {
+// The tool description must keep network-environment failures out of the human
+// input queue while preserving ask_operator for real human-only actions.
+func TestAskOperatorEnvironmentalBlockerGuidance(t *testing.T) {
 	desc := (&Server{}).toolAskOperator().Description()
-	for _, marker := range []string{"copy-pastable", "do not retry or work around"} {
+	if desc == legacyAskOperatorEnvHandoffDescription || !strings.Contains(legacyAskOperatorEnvHandoffDescription, "copy-pastable") {
+		t.Fatal("ask_operator legacy-description migration guard is not anchored to the prior code default")
+	}
+	for _, marker := range []string{"human-only input or action", "[environmental_blocker]", "Never ask the operator merely to repeat"} {
 		if !strings.Contains(desc, marker) {
-			t.Errorf("ask_operator description missing env-handoff marker %q", marker)
+			t.Errorf("ask_operator description missing environmental-blocker marker %q", marker)
 		}
+	}
+}
+
+func TestAutomaticEnvironmentalNetworkBlock(t *testing.T) {
+	for _, q := range []string{
+		"Proxy CONNECT aborted due to timeout; run curl in your terminal",
+		"The fetch returned HTTP_STATUS=000 and no body",
+		"curl: (28) Connection timed out after 25000 milliseconds",
+		"TLS handshake timeout while reaching the target",
+		"connect: network is unreachable",
+		"dial tcp: no route to host",
+	} {
+		if !automaticEnvironmentalNetworkBlock(q) {
+			t.Errorf("did not classify network-environment handoff %q", q)
+		}
+	}
+	for _, q := range []string{
+		"Enter the 6-digit OTP sent to the test account",
+		"Please solve the captcha shown in shot.png",
+		"Approve the bounded state-changing retest before I continue",
+		"Provide the client certificate key controlled by the operator",
+	} {
+		if automaticEnvironmentalNetworkBlock(q) {
+			t.Errorf("classified real human input as a network blocker %q", q)
+		}
+	}
+}
+
+// The runtime guard is before task lookup and pause bookkeeping: an
+// environmental handoff must return guidance without emitting a question or
+// requiring a live manager, whereas a genuine human question proceeds to the
+// normal run-context validation.
+func TestAskOperatorDoesNotPauseEnvironmentalNetworkBlock(t *testing.T) {
+	tool := (&Server{}).toolAskOperator()
+	res, err := tool.Call(context.Background(), json.RawMessage(`{"question":"curl: (28) Proxy CONNECT aborted due to timeout; please run curl https://example.test in your terminal"}`), nil)
+	if err != nil || res.IsError || !strings.Contains(res.Flatten(), "handoff was not delivered") || !strings.Contains(res.Flatten(), "record_fact") {
+		t.Fatalf("environmental handoff: result=%q is_error=%v err=%v", res.Flatten(), res.IsError, err)
+	}
+	res, err = tool.Call(context.Background(), json.RawMessage(`{"question":"Enter the 6-digit OTP"}`), nil)
+	if err != nil || !res.IsError || !strings.Contains(res.Flatten(), "only be used inside a worker intent run") {
+		t.Fatalf("human-only request bypassed normal validation: result=%q is_error=%v err=%v", res.Flatten(), res.IsError, err)
 	}
 }

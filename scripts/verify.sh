@@ -99,8 +99,14 @@ if want_go; then
 
   check_gofmt() {
     local -a files=()
+    local file
     local out
-    mapfile -t files < <(git ls-files '*.go')
+    # Bash 3.2 (the macOS system shell) has neither mapfile nor readarray.
+    # Consume Git's NUL-delimited output explicitly so spaces and newlines in
+    # tracked file names remain safe on both macOS and Linux.
+    while IFS= read -r -d '' file; do
+      files[${#files[@]}]="$file"
+    done < <(git ls-files -z -- '*.go')
     if [ "${#files[@]}" -eq 0 ]; then
       return 0
     fi

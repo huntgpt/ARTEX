@@ -122,7 +122,10 @@ func captureRunSessionWithEvidence(ctx context.Context, s *agentcore.Session, in
 			lastTool.done(ev.ToolResult.ToolUseID)
 			auditTrace.Complete(ev.ToolResult.ToolUseID, out, ev.ToolResult.IsError)
 			toolName := toolNames[ev.ToolResult.ToolUseID]
-			artifacts := artifactsFromToolResult(toolName, out)
+			var artifacts []EvidenceArtifact
+			if !ev.ToolResult.IsError {
+				artifacts = EvidenceArtifactsFromToolResult(toolName, out)
+			}
 			if generated, genErr := terminalEvidence(evidence, ev.ToolResult.ToolUseID, toolName,
 				toolInputs[ev.ToolResult.ToolUseID], out, time.Now()); genErr != nil {
 				log.Printf("[evidence] terminal capture for %s: %v", ev.ToolResult.ToolUseID, genErr)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +25,8 @@ type RedTeamPhaseRun struct {
 	Tool          string     `json:"tool,omitempty"`
 	CurrentResult string     `json:"current_result,omitempty"`
 	BlockerReason string     `json:"blocker_reason,omitempty"`
+	BlockerKind   string     `json:"blocker_kind,omitempty"`
+	BlockerSource string     `json:"blocker_source,omitempty"`
 	StartedAt     *time.Time `json:"started_at,omitempty"`
 	FinishedAt    *time.Time `json:"finished_at,omitempty"`
 	UpdatedAt     time.Time  `json:"updated_at"`
@@ -58,7 +61,7 @@ func (s *ExplorationStore) GoalCompletionIssues(ctx context.Context, req GoalCom
 	issues := []string{}
 	if req.WorkflowComplete {
 		rows, err := s.db.QueryContext(ctx, `SELECT phase,state FROM red_team_phase_runs
-WHERE exploration_id=$1 AND state IN ('pending','ready','running') ORDER BY phase`, s.expID)
+WHERE exploration_id=$1 AND state NOT IN ('complete','skipped') ORDER BY phase`, s.expID)
 		if err != nil {
 			return nil, err
 		}
@@ -198,6 +201,57 @@ var validRedTeamPhaseStates = map[string]bool{
 	"complete": true, "skipped": true, "failed": true,
 }
 
+var validRedTeamBlockerKinds = map[string]bool{"dependency": true, "evidence": true, "operational": true}
+var validPendingBlockerKinds = map[string]bool{"dependency": true, "evidence": true}
+
+func validateRedTeamBlockerSource(ctx context.Context, tx *sql.Tx, explorationID int64, definition RedTeamPhaseDefinition, blockerKind, blockerSource string, dependencyStates map[string]string) error {
+	prefix, value, ok := strings.Cut(blockerSource, ":")
+	if !ok || strings.TrimSpace(value) == "" {
+		return errors.New("blocker_source must be a typed durable reference")
+	}
+	value = strings.TrimSpace(value)
+	switch blockerKind {
+	case "dependency":
+		if prefix != "phase" {
+			return errors.New("dependency blocker_source must be phase:<dependency>")
+		}
+		isDependency := false
+		for _, dependency := range definition.Dependencies {
+			if value == dependency {
+				isDependency = true
+				break
+			}
+		}
+		if !isDependency {
+			return fmt.Errorf("phase %s is not a dependency of %s", value, definition.Phase)
+		}
+		state := dependencyStates[value]
+		if state == "complete" || state == "skipped" {
+			return fmt.Errorf("dependency blocker_source phase:%s is already %s", value, state)
+		}
+	case "evidence":
+		if prefix != KindFact && prefix != KindIntent {
+			return errors.New("evidence blocker_source must be fact:<id> or intent:<id>")
+		}
+		nodeID, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || nodeID <= 0 {
+			return errors.New("evidence blocker_source contains an invalid node id")
+		}
+		var kind string
+		err = tx.QueryRowContext(ctx, `SELECT kind FROM exploration_nodes WHERE exploration_id=$1 AND id=$2`, explorationID, nodeID).Scan(&kind)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("evidence blocker_source does not exist in this exploration")
+		}
+		if err != nil {
+			return err
+		}
+		if kind != prefix {
+			return fmt.Errorf("evidence blocker_source expected %s but node is %s", prefix, kind)
+		}
+	}
+	return nil
+}
+
 func (d *DB) EnsureRedTeamWorkflow(ctx context.Context, explorationID int64) error {
 	if explorationID <= 0 {
 		return errors.New("red-team workflow requires an exploration")
@@ -219,39 +273,48 @@ func (d *DB) EnsureRedTeamWorkflow(ctx context.Context, explorationID int64) err
 }
 
 func refreshRedTeamReady(ctx context.Context, tx *sql.Tx, explorationID int64) error {
-	states := map[string]string{}
-	rows, err := tx.QueryContext(ctx, `SELECT phase,state FROM red_team_phase_runs WHERE exploration_id=$1`, explorationID)
+	type phaseState struct {
+		state       string
+		blockerKind string
+	}
+	states := map[string]phaseState{}
+	rows, err := tx.QueryContext(ctx, `SELECT phase,state,blocker_kind FROM red_team_phase_runs WHERE exploration_id=$1`, explorationID)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
-		var phase, state string
-		if err := rows.Scan(&phase, &state); err != nil {
+		var phase string
+		var item phaseState
+		if err := rows.Scan(&phase, &item.state, &item.blockerKind); err != nil {
 			rows.Close()
 			return err
 		}
-		states[phase] = state
+		states[phase] = item
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
 	for _, definition := range RedTeamWorkflow {
-		if states[definition.Phase] != "pending" {
+		current := states[definition.Phase]
+		if current.state != "pending" && !(current.state == "blocked" && current.blockerKind == "dependency") {
 			continue
 		}
 		ready := true
 		for _, dependency := range definition.Dependencies {
-			state := states[dependency]
+			state := states[dependency].state
 			if state != "complete" && state != "skipped" {
 				ready = false
 				break
 			}
 		}
 		if ready {
-			if _, err := tx.ExecContext(ctx, `UPDATE red_team_phase_runs SET state='ready',updated_at=now() WHERE exploration_id=$1 AND phase=$2 AND state='pending'`, explorationID, definition.Phase); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE red_team_phase_runs
+SET state='ready', blocker_reason='', blocker_kind='', blocker_source='', finished_at=NULL, updated_at=now()
+WHERE exploration_id=$1 AND phase=$2
+  AND (state='pending' OR (state='blocked' AND blocker_kind='dependency'))`, explorationID, definition.Phase); err != nil {
 				return err
 			}
-			states[definition.Phase] = "ready"
+			states[definition.Phase] = phaseState{state: "ready"}
 		}
 	}
 	return nil
@@ -261,7 +324,7 @@ func (d *DB) RedTeamWorkflowRuns(ctx context.Context, explorationID int64) ([]Re
 	if err := d.EnsureRedTeamWorkflow(ctx, explorationID); err != nil {
 		return nil, err
 	}
-	rows, err := d.QueryContext(ctx, `SELECT phase,state,owner,tool,current_result,blocker_reason,started_at,finished_at,updated_at FROM red_team_phase_runs WHERE exploration_id=$1`, explorationID)
+	rows, err := d.QueryContext(ctx, `SELECT phase,state,owner,tool,current_result,blocker_reason,blocker_kind,blocker_source,started_at,finished_at,updated_at FROM red_team_phase_runs WHERE exploration_id=$1`, explorationID)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +332,7 @@ func (d *DB) RedTeamWorkflowRuns(ctx context.Context, explorationID int64) ([]Re
 	byPhase := map[string]RedTeamPhaseRun{}
 	for rows.Next() {
 		var run RedTeamPhaseRun
-		if err := rows.Scan(&run.Phase, &run.State, &run.Owner, &run.Tool, &run.CurrentResult, &run.BlockerReason, &run.StartedAt, &run.FinishedAt, &run.UpdatedAt); err != nil {
+		if err := rows.Scan(&run.Phase, &run.State, &run.Owner, &run.Tool, &run.CurrentResult, &run.BlockerReason, &run.BlockerKind, &run.BlockerSource, &run.StartedAt, &run.FinishedAt, &run.UpdatedAt); err != nil {
 			return nil, err
 		}
 		run.RedTeamPhaseDefinition = redTeamPhaseByName[run.Phase]
@@ -295,10 +358,11 @@ func (d *DB) RedTeamWorkflowRuns(ctx context.Context, explorationID int64) ([]Re
 	return out, nil
 }
 
-func (d *DB) TransitionRedTeamPhase(ctx context.Context, explorationID int64, phase, state, owner, tool, result, blocker string) ([]RedTeamPhaseRun, error) {
+func (d *DB) TransitionRedTeamPhase(ctx context.Context, explorationID int64, phase, state, owner, tool, result, blocker, blockerKind, blockerSource string) ([]RedTeamPhaseRun, error) {
 	phase, state = strings.TrimSpace(phase), strings.TrimSpace(state)
+	blocker, blockerKind, blockerSource = strings.TrimSpace(blocker), strings.TrimSpace(blockerKind), strings.TrimSpace(blockerSource)
 	definition, exists := redTeamPhaseByName[phase]
-	if !exists || !validRedTeamPhaseStates[state] || state == "pending" {
+	if !exists || !validRedTeamPhaseStates[state] {
 		return nil, fmt.Errorf("invalid red-team phase transition %q -> %q", phase, state)
 	}
 	if err := d.EnsureRedTeamWorkflow(ctx, explorationID); err != nil {
@@ -313,29 +377,61 @@ func (d *DB) TransitionRedTeamPhase(ctx context.Context, explorationID int64, ph
 	if err := tx.QueryRowContext(ctx, `SELECT state FROM red_team_phase_runs WHERE exploration_id=$1 AND phase=$2 FOR UPDATE`, explorationID, phase).Scan(&current); err != nil {
 		return nil, err
 	}
-	if state == "running" || state == "complete" {
+	dependenciesReady := true
+	var waitingDependencies []string
+	dependencyStates := map[string]string{}
+	if state == "ready" || state == "running" || state == "complete" || (state == "blocked" && blockerKind == "dependency") {
 		for _, dependency := range definition.Dependencies {
 			var dependencyState string
 			if err := tx.QueryRowContext(ctx, `SELECT state FROM red_team_phase_runs WHERE exploration_id=$1 AND phase=$2`, explorationID, dependency).Scan(&dependencyState); err != nil {
 				return nil, err
 			}
+			dependencyStates[dependency] = dependencyState
 			if dependencyState != "complete" && dependencyState != "skipped" {
-				return nil, fmt.Errorf("phase %s waits for %s (%s)", phase, dependency, dependencyState)
+				dependenciesReady = false
+				waitingDependencies = append(waitingDependencies, dependency+" ("+dependencyState+")")
 			}
 		}
 	}
-	allowed := current == "ready" || current == "running" || current == "blocked" || current == "failed"
-	if !allowed || (current == "ready" && state == "complete") {
+	if (state == "ready" || state == "running" || state == "complete") && !dependenciesReady {
+		return nil, fmt.Errorf("phase %s waits for %s", phase, strings.Join(waitingDependencies, ", "))
+	}
+	allowed := current == "ready" || current == "running" || current == "blocked" || current == "failed" || (current == "pending" && state == "blocked")
+	if !allowed || (current == "ready" && state == "complete") || (state == "pending" && current != "blocked" && current != "failed") {
 		return nil, fmt.Errorf("phase %s cannot transition from %s to %s", phase, current, state)
 	}
-	if state == "blocked" && strings.TrimSpace(blocker) == "" {
+	if state == "blocked" && blocker == "" {
 		return nil, errors.New("blocked red-team phase requires blocker_reason")
+	}
+	if state == "blocked" && blockerKind == "" {
+		blockerKind = "operational"
+	}
+	if state == "blocked" && !validRedTeamBlockerKinds[blockerKind] {
+		return nil, errors.New("blocked red-team phase requires blocker_kind dependency, evidence, or operational")
+	}
+	if state == "blocked" && (blockerKind == "dependency" || blockerKind == "evidence") && blockerSource == "" {
+		return nil, errors.New("dependency/evidence blocker requires blocker_source provenance")
+	}
+	if state == "blocked" && (blockerKind == "dependency" || blockerKind == "evidence") {
+		if err := validateRedTeamBlockerSource(ctx, tx, explorationID, definition, blockerKind, blockerSource, dependencyStates); err != nil {
+			return nil, err
+		}
+	}
+	if state == "blocked" && blockerKind == "dependency" && dependenciesReady {
+		return nil, fmt.Errorf("phase %s has no unfinished dependency to block on", phase)
+	}
+	if current == "pending" && state == "blocked" {
+		if !validPendingBlockerKinds[blockerKind] {
+			return nil, errors.New("blocking a pending red-team phase requires blocker_kind dependency or evidence")
+		}
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE red_team_phase_runs SET state=$3,owner=$4,tool=$5,current_result=$6,
 blocker_reason=CASE WHEN $3 IN ('blocked','failed') THEN $7 ELSE '' END,
+blocker_kind=CASE WHEN $3 IN ('blocked','failed') THEN $8 ELSE '' END,
+blocker_source=CASE WHEN $3 IN ('blocked','failed') THEN $9 ELSE '' END,
 started_at=CASE WHEN $3='running' AND started_at IS NULL THEN now() ELSE started_at END,
-finished_at=CASE WHEN $3 IN ('complete','skipped') THEN now() WHEN $3 IN ('ready','running') THEN NULL ELSE finished_at END,
-updated_at=now() WHERE exploration_id=$1 AND phase=$2`, explorationID, phase, state, utf8Clean(owner), utf8Clean(tool), utf8Clean(result), utf8Clean(blocker))
+finished_at=CASE WHEN $3 IN ('complete','skipped') THEN now() WHEN $3 IN ('pending','ready','running') THEN NULL ELSE finished_at END,
+updated_at=now() WHERE exploration_id=$1 AND phase=$2`, explorationID, phase, state, utf8Clean(owner), utf8Clean(tool), utf8Clean(result), utf8Clean(blocker), utf8Clean(blockerKind), utf8Clean(blockerSource))
 	if err != nil {
 		return nil, err
 	}

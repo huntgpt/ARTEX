@@ -1654,6 +1654,8 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			"items": obj(map[string]any{"traffic_id": str("a real traffic ID returned by traffic_search"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("how this traffic supports the finding's conclusion")}, "traffic_id")},
 		"counterevidence":      str("optional: what you tested that did not work (variants, paths, or bypasses that were blocked or came back negative). Fill it when your confidence is not high; omitting it never blocks reporting."),
 		"confidence_rationale": str("optional: why the conclusion holds (which observation rules out the benign explanation). Fill it when your confidence is not high; omitting it never blocks reporting."),
+		"existing_finding_id":  idp("optional: standalone finding_id of an existing finding in this same task to extend instead of creating a duplicate"),
+		"finding_id":           idp("optional alias of existing_finding_id for extending an existing same-task finding; this is the standalone finding_id, not the exploration node id"),
 		"force_register":       map[string]any{"type": "boolean", "description": "optional: register even though the advisory duplicate check would suppress this finding. Use it only after a suppression when the new evidence is in fact a distinct defect (different endpoint, parameter or root cause); the suppression answer says so and names the finding it matched."},
 	}, "vulnclass", "severity", "summary"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		var a struct {
@@ -1665,6 +1667,8 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
 			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
+			ExistingFindingID                            json.RawMessage   `json:"existing_finding_id"`
+			FindingID                                    json.RawMessage   `json:"finding_id"`
 		}
 		if err := json.Unmarshal(in, &a); err != nil {
 			return actool.Errorf(err.Error()), nil
@@ -1696,7 +1700,24 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 				return actool.Errorf(err.Error()), nil
 			}
 		}
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs), Counterevidence: a.Counterevidence, ConfidenceRationale: a.ConfidenceRationale}
+		existingFindingID, aliasFindingID := pid(a.ExistingFindingID), pid(a.FindingID)
+		if existingFindingID > 0 && aliasFindingID > 0 && existingFindingID != aliasFindingID {
+			return actool.Errorf("existing_finding_id and finding_id must name the same existing finding when both are provided"), nil
+		}
+		if existingFindingID == 0 {
+			existingFindingID = aliasFindingID
+		}
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), ExistingFindingID: existingFindingID, VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs), Counterevidence: a.Counterevidence, ConfidenceRationale: a.ConfidenceRationale, SkipDuplicateCheck: a.ForceRegister}
+		// Exact same-task matches are resolved deterministically before asking the
+		// advisory decision model. RecordFindingTx repeats this under the task lock
+		// to close the concurrent check/write window.
+		if input.ExistingFindingID == 0 && !input.SkipDuplicateCheck {
+			if findingID, _, ok, matchErr := t.ts.DeterministicFindingMatch(ctx, input); matchErr != nil {
+				log.Printf("[finding-dedup] deterministic preflight failed (continuing to advisory triage): %v", matchErr)
+			} else if ok {
+				input.ExistingFindingID = findingID
+			}
+		}
 		// Advisory dedup (agent/triage.go): a decision model answers "same defect as
 		// an already registered finding?" in one small request instead of a
 		// main-model turn. A confident duplicate is not registered a second time —
@@ -1707,7 +1728,9 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		// force_register is the way back out of a wrong suppression: without it the
 		// advice "register it again if it is distinct" is unactionable, because the
 		// retry hits the same check and is suppressed again.
-		if a.ForceRegister {
+		if input.ExistingFindingID > 0 {
+			log.Printf("[finding-dedup] extending existing finding_id=%d", input.ExistingFindingID)
+		} else if a.ForceRegister {
 			log.Printf("[triage] override: force_register set, registering %q without the duplicate check", a.Name)
 		} else if ans, ok := t.triageDuplicate(ctx, input); ok && triageDuplicateHit(ans) {
 			res := map[string]any{
@@ -1733,6 +1756,14 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		}
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
+		}
+		if recorded.ReusedExisting {
+			for i := range recorded.Traffic.Bindings {
+				recorded.Traffic.Bindings[i].Snapshot.ReqHead = ""
+				recorded.Traffic.Bindings[i].Snapshot.RespHead = ""
+			}
+			raw, _ := json.Marshal(recorded)
+			return actool.Text(fmt.Sprintf("finding matched and linked to existing finding_id %d (node %d) — no duplicate created\n%s", recorded.FindingID, recorded.NodeID, raw)), nil
 		}
 		if t.notifyFinding != nil {
 			iid := input.IntentID

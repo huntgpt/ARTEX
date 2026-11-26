@@ -28,13 +28,13 @@ var noTargetTools = toolSet(
 	"set_goals", "set_constraints", "list_goals", "prove_goal", "goal_met",
 	"insert_assets", "add_company_scope", "add_task_scope", "list_assets",
 	"list_untested_assets", "list_companies", "report_finding", "record_fact",
-	"save_task_credential", "list_task_credentials", "list_discovered_secrets", "ingest_bbot", "ingest_scan_output", "ingest_ad_observation", "record_coverage",
+	"save_task_credential", "list_task_credentials", "list_discovered_secrets", "ingest_bbot", "ingest_scan_output", "ingest_browser_evidence", "ingest_ad_observation", "record_coverage",
 	// cross-task orchestration, findings and retests (server)
 	"list_tasks", "list_llm_profiles", "spawn_task", "pause_task", "get_task_graph",
 	"list_task_findings", "add_task_hint", "get_task_worker_trace",
 	"list_task_worker_traces", "search_task_worker_traces", "get_task_node_detail",
 	"update_finding_report", "get_finding_traffic", "bind_finding_traffic",
-	"get_finding_retest_context", "record_finding_retest_result",
+	"get_finding_retest_context", "record_finding_retest_result", "ingest_retest_browser_evidence",
 	"delete_assets_by_host", "create_skill", "update_skill_file",
 	// the operator runs the command, not the platform
 	"ask_operator",

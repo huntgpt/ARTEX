@@ -567,6 +567,8 @@ export interface RedTeamPhaseRun {
   tool?: string;
   current_result?: string;
   blocker_reason?: string;
+  blocker_kind?: "dependency" | "evidence" | "operational";
+  blocker_source?: string;
   started_at?: string;
   finished_at?: string;
   updated_at: string;

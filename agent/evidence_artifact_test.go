@@ -71,6 +71,38 @@ func TestEvidenceMetadataPreservesExistingKeys(t *testing.T) {
 	}
 }
 
+func TestEvidenceArtifactsFromWrappedToolResult(t *testing.T) {
+	validBrowser := `{"artifacts":[{"ref":"tasks/1/real.png","kind":"browser_screenshot","label":"Actual browser screenshot","mime_type":"image/png","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byte_size":42,"captured_at":"2026-11-26T10:00:00Z","tool":"gowitness","source_url":"https://example.com/","original_name":"real.png"}]}`
+	nonce := "0123456789abcdef"
+	wrapped := "<<<UNTRUSTED_OUTPUT " + nonce + ">>>>\n" + untrustedToolIntro + "\n" + validBrowser + "\n<<<END_UNTRUSTED_OUTPUT " + nonce + ">>>>"
+	if got := EvidenceArtifactsFromToolResult("ingest_scan_output", wrapped); len(got) != 1 || got[0].OriginalName != "real.png" {
+		t.Fatalf("wrapped artifacts = %+v, want one real browser capture", got)
+	}
+	playwright := strings.Replace(validBrowser, `"tool":"gowitness"`, `"tool":"playwright"`, 1)
+	if got := EvidenceArtifactsFromToolResult("ingest_browser_evidence", playwright); len(got) != 1 || got[0].Tool != "playwright" {
+		t.Fatalf("playwright artifacts = %+v, want one code-owned browser capture", got)
+	}
+	if got := EvidenceArtifactsFromToolResult("ingest_retest_browser_evidence", playwright); len(got) != 1 || got[0].Tool != "playwright" {
+		t.Fatalf("retest playwright artifacts = %+v, want one code-owned browser capture", got)
+	}
+	if got := EvidenceArtifactsFromToolResult("ingest_browser_evidence", validBrowser); len(got) != 0 {
+		t.Fatalf("gowitness artifact accepted from playwright importer: %+v", got)
+	}
+
+	for name, malformed := range map[string]string{
+		"mismatched nonce": strings.Replace(wrapped, "END_UNTRUSTED_OUTPUT "+nonce, "END_UNTRUSTED_OUTPUT fedcba9876543210", 1),
+		"invalid nonce":    strings.Replace(wrapped, nonce, "not-a-hex-nonce!", 1),
+		"missing intro":    strings.Replace(wrapped, untrustedToolIntro+"\n", "", 1),
+		"trailing text":    wrapped + "\n{}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := EvidenceArtifactsFromToolResult("ingest_scan_output", malformed); len(got) != 0 {
+				t.Fatalf("malformed frame accepted: %+v", got)
+			}
+		})
+	}
+}
+
 func TestImportBrowserScreenshotPreservesOriginalBytes(t *testing.T) {
 	base := t.TempDir()
 	runDir := filepath.Join(base, "tasks", "3", "i9")
