@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -29,8 +30,13 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 		Model:     p.Model,
 		Source:    source,
 	}
-	// Ollama profiles are keyless by design; the other formats need a key.
-	if p.APIKey == "" && p.Format != "ollama" {
+	// Keep admission/status reporting aligned with the provider builder. Local
+	// OAuth-backed CLI profiles and Ollama are keyless; cloud providers are not.
+	// Config.NeedsAPIKey is the authoritative format policy used by runtime
+	// profile loading as well, so a newly added keyless format cannot silently
+	// become runnable while this endpoint still reports it unavailable.
+	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	if cfg.APIKey == "" && cfg.NeedsAPIKey() {
 		result.Reason = "LLM profile has no API Key set"
 		return result
 	}

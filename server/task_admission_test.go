@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -568,6 +569,60 @@ func TestTaskLLMResolutionRejectsInvalidExplicitProfile(t *testing.T) {
 	}
 	if got.Available || got.Source != "task_chain" || got.ProfileID == nil || *got.ProfileID != profileID {
 		t.Fatalf("resolution=%+v, want unavailable explicit task profile", got)
+	}
+}
+
+func TestTaskLLMResolutionKeyPolicyMatchesRuntimeProviderFormats(t *testing.T) {
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		db.SkipPGUnavailable(t, err)
+	}
+	defer m.Close()
+
+	tests := []struct {
+		name       string
+		format     string
+		apiKey     string
+		want       bool
+		wantReason string
+	}{
+		{name: "claude cli is OAuth backed", format: "claude-cli", want: true},
+		{name: "codex cli is OAuth backed", format: "codex-cli", want: true},
+		{name: "openai without key", format: "openai", wantReason: "LLM profile has no API Key set"},
+		{name: "openai with key", format: "openai", apiKey: "test-key", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := &db.LLMProfile{
+				Name:   fmt.Sprintf("resolution-key-policy-%s-%d", tt.format, time.Now().UnixNano()),
+				Format: tt.format,
+				Model:  "test-model",
+				APIKey: tt.apiKey,
+			}
+			if tt.format == "claude-cli" || tt.format == "codex-cli" {
+				profile.CLIPath = os.Args[0]
+				profile.CLIConfigDir = t.TempDir()
+			}
+			profileID, err := m.pg.SaveProfile(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := m.pg.DeleteProfile(profileID); err != nil {
+					t.Errorf("delete profile: %v", err)
+				}
+			}()
+			profile, err = m.pg.ProfileByID(profileID)
+			if err != nil || profile == nil {
+				t.Fatalf("reload profile: profile=%+v err=%v", profile, err)
+			}
+
+			s := &Server{m: m, provByProfile: map[int64]*provEntry{}}
+			got := s.resolutionFromProfile(profile, "task_chain")
+			if got.Available != tt.want || got.Reason != tt.wantReason {
+				t.Fatalf("resolution=%+v, want available=%v reason=%q", got, tt.want, tt.wantReason)
+			}
+		})
 	}
 }
 
