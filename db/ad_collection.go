@@ -52,6 +52,8 @@ type ADCollectionArtifact struct {
 var validADCollectors = map[string]bool{
 	"sharphound": true, "bloodhound-python": true, "adexplorer": true,
 	"ldap": true, "operator-upload": true,
+	"bloodhound": true, "certipy": true, "configmanbearpig": true,
+	"bloodyad": true, "ldapdomaindump": true, "impacket": true, "netexec": true,
 }
 var validADModes = map[string]bool{"offline-import": true, "remote": true, "on-host": true}
 

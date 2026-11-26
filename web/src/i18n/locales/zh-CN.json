@@ -2739,5 +2739,9 @@
   "No result summary": "暂无结果摘要",
   "No tool execution yet": "尚未执行工具",
   "Blocked reason": "阻塞原因",
-  "Progress": "进度"
+  "Progress": "进度",
+  "Red-team workflow": "红队工作流",
+  "Dependency-aware phases show what ARTEX runs, what needs an operator, the active tool and any blocker.": "依赖感知阶段会显示 ARTEX 执行的内容、需要操作员的步骤、当前工具及所有阻塞项。",
+  "Depends on": "依赖于",
+  "No workflow state yet": "暂无工作流状态"
 }

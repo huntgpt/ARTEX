@@ -399,6 +399,11 @@ The image includes a scanner toolchain (`nmap`, `nuclei`, `httpx`, `katana`, `ff
 persists `./keys` and `./data`; it does not mount a host `skills/` directory, so the image's
 built-in skills are used.
 
+The task Progress view also includes a dependency-aware red-team workflow through AD access.
+After AD collection it fans out into parallel ADCS, SCCM/MECM, MSSQL, Exchange, relay/coercion,
+ACL/GPO, delegation, shadow-credential and credential-material analysis modules, then converges
+before access validation, retest and the final report.
+
 #### Compose stack from the prebuilt image
 
 `docker-compose.ghcr.yml` runs the same ARTEX + PostgreSQL stack from the released image, with no

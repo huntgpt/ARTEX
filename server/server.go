@@ -828,6 +828,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/ad/runs", s.taskADRuns)
 	mux.HandleFunc("POST /api/tasks/{id}/ad/runs", s.createTaskADRun)
 	mux.HandleFunc("POST /api/tasks/{id}/ad/runs/{run}/transition", s.transitionTaskADRun)
+	mux.HandleFunc("GET /api/tasks/{id}/red-team-workflow", s.taskRedTeamWorkflow)
+	mux.HandleFunc("POST /api/tasks/{id}/red-team-workflow/{phase}/transition", s.transitionTaskRedTeamPhase)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)

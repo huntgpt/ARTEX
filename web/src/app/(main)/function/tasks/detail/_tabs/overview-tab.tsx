@@ -39,6 +39,7 @@ import type {
   Finding,
   ModelTokenStat,
   NewAssetType,
+  RedTeamPhaseRun,
   Stats,
   Task,
   TaskConstraint,
@@ -115,6 +116,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
   const [findings, setFindings] = React.useState<Finding[]>([]);
   const [recentActivity, setRecentActivity] = React.useState<Activity[]>([]);
+  const [workflow, setWorkflow] = React.useState<RedTeamPhaseRun[]>([]);
   const [coverage, setCoverage] = React.useState<{
     enabled: boolean;
     scope_rows: number;
@@ -364,12 +366,13 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       if (loading) return;
       loading = true;
       try {
-        const [taskResp, statsResp, intentsResp, findingsResp, activityResp] = await Promise.all([
+        const [taskResp, statsResp, intentsResp, findingsResp, activityResp, workflowResp] = await Promise.all([
           api.task(taskId),
           api.stats(taskId),
           api.intents(taskId),
           api.findings(taskId),
           api.activity(taskId, { latest: true, limit: 60 }),
+          api.redTeamWorkflow(taskId),
         ]);
         if (cancelled) return;
         const activeTask = statsResp.active_task;
@@ -389,6 +392,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         setIntents(intentsResp);
         setFindings(findingsResp);
         setRecentActivity(activityResp.items);
+        setWorkflow(workflowResp.phases);
         // coverage is independent + may 503 when no asset store — fetch separately so
         // its failure never blocks the others.
         api
@@ -997,6 +1001,58 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       </Card>
 
       {/* Work set */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ListChecksIcon className="size-4 text-primary" /> {t("Red-team workflow")}
+          </CardTitle>
+          <CardDescription>
+            {t(
+              "Dependency-aware phases show what ARTEX runs, what needs an operator, the active tool and any blocker.",
+            )}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+          {workflow.map((phase, index) => (
+            <div key={phase.phase} className="rounded-md border p-3 text-sm">
+              <div className="flex items-start gap-2">
+                <span className="text-muted-foreground text-xs tabular-nums">{String(index + 1).padStart(2, "0")}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium">{phase.label}</span>
+                    <Badge variant={phase.state === "blocked" || phase.state === "failed" ? "destructive" : "outline"}>
+                      {phase.state}
+                    </Badge>
+                  </div>
+                  <div className="mt-1 text-muted-foreground text-xs">
+                    {phase.execution.replaceAll("_", " ")} · {(phase.tool || phase.tools.join(", ")) ?? "—"}
+                  </div>
+                  {phase.owner ? (
+                    <div className="mt-1 text-xs">
+                      {t("Agent")}: {phase.owner}
+                    </div>
+                  ) : null}
+                  {phase.current_result ? (
+                    <p className="mt-1 line-clamp-2 text-muted-foreground text-xs">{phase.current_result}</p>
+                  ) : null}
+                  {phase.blocker_reason ? (
+                    <p className="mt-1 rounded bg-destructive/5 px-2 py-1 text-destructive text-xs">
+                      {t("Blocked reason")}: {phase.blocker_reason}
+                    </p>
+                  ) : null}
+                  {phase.dependencies.length > 0 ? (
+                    <p className="mt-1 truncate text-muted-foreground text-[11px]">
+                      {t("Depends on")}: {phase.dependencies.join(", ")}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ))}
+          {workflow.length === 0 ? <p className="text-muted-foreground text-sm">{t("No workflow state yet")}</p> : null}
+        </CardContent>
+      </Card>
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card>
           <CardHeader>

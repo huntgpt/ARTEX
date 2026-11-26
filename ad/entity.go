@@ -7,6 +7,7 @@
 package ad
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,18 +19,43 @@ import (
 type EntityKind string
 
 const (
-	EntityDomain   EntityKind = "domain"
-	EntityUser     EntityKind = "user"
-	EntityGroup    EntityKind = "group"
-	EntityComputer EntityKind = "computer"
+	EntityDomain         EntityKind = "domain"
+	EntityUser           EntityKind = "user"
+	EntityGroup          EntityKind = "group"
+	EntityComputer       EntityKind = "computer"
+	EntityOU             EntityKind = "ou"
+	EntityGPO            EntityKind = "gpo"
+	EntityContainer      EntityKind = "container"
+	EntityCertTemplate   EntityKind = "cert_template"
+	EntityEnterpriseCA   EntityKind = "enterprise_ca"
+	EntityRootCA         EntityKind = "root_ca"
+	EntityAIACA          EntityKind = "aiaca"
+	EntityNTAuthStore    EntityKind = "ntauth_store"
+	EntityIssuancePolicy EntityKind = "issuance_policy"
+	EntitySCCMSite       EntityKind = "sccm_site"
+	EntityMSSQLServer    EntityKind = "mssql_server"
+	EntityExchangeServer EntityKind = "exchange_server"
 )
 
 type Relation string
 
 const (
-	RelationMemberOf   Relation = "member_of"
-	RelationAdminTo    Relation = "admin_to"
-	RelationHasSession Relation = "has_session"
+	RelationMemberOf             Relation = "member_of"
+	RelationAdminTo              Relation = "admin_to"
+	RelationHasSession           Relation = "has_session"
+	RelationGenericAll           Relation = "generic_all"
+	RelationGenericWrite         Relation = "generic_write"
+	RelationWriteDACL            Relation = "write_dacl"
+	RelationWriteOwner           Relation = "write_owner"
+	RelationAllowedToAct         Relation = "allowed_to_act"
+	RelationAllowedToDelegate    Relation = "allowed_to_delegate"
+	RelationAddKeyCredentialLink Relation = "add_key_credential_link"
+	RelationWriteGPLink          Relation = "write_gp_link"
+	RelationEnroll               Relation = "enroll"
+	RelationManageCA             Relation = "manage_ca"
+	RelationCoerceRelayLDAP      Relation = "coerce_relay_ldap"
+	RelationCoerceRelaySMB       Relation = "coerce_relay_smb"
+	RelationCoerceRelayADCS      Relation = "coerce_relay_adcs"
 )
 
 type ObservationState string
@@ -73,20 +99,27 @@ type Observation struct {
 const MaxItems = 50000
 
 var (
-	sidPattern  = regexp.MustCompile(`(?i)^S-1-(?:\d+-){1,14}\d+$`)
-	guidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-	dnsLabel    = regexp.MustCompile(`(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+	sidPattern       = regexp.MustCompile(`(?i)^S-1-(?:\d+-){1,14}\d+$`)
+	guidPattern      = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	opaqueKeyPattern = regexp.MustCompile(`(?i)^[a-z0-9][a-z0-9@._:/\\-]{0,511}$`)
+	kindPattern      = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	relationPattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,95}$`)
+	dnsLabel         = regexp.MustCompile(`(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
 func ValidObjectKey(v string) bool {
 	v = strings.TrimSpace(v)
-	return sidPattern.MatchString(v) || guidPattern.MatchString(v)
+	return sidPattern.MatchString(v) || guidPattern.MatchString(v) || opaqueKeyPattern.MatchString(v)
 }
 
 func NormalizeObjectKey(v string) string {
 	v = strings.TrimSpace(v)
-	if !ValidObjectKey(v) {
+	if v == "" {
 		return ""
+	}
+	if !ValidObjectKey(v) {
+		digest := sha256.Sum256([]byte(v))
+		return fmt.Sprintf("OPAQUE:%X", digest)
 	}
 	return strings.ToUpper(v)
 }
@@ -109,21 +142,11 @@ func NormalizeDNSName(v string) string {
 }
 
 func ValidEntityKind(v EntityKind) bool {
-	switch v {
-	case EntityDomain, EntityUser, EntityGroup, EntityComputer:
-		return true
-	default:
-		return false
-	}
+	return kindPattern.MatchString(string(v))
 }
 
 func ValidRelation(v Relation) bool {
-	switch v {
-	case RelationMemberOf, RelationAdminTo, RelationHasSession:
-		return true
-	default:
-		return false
-	}
+	return relationPattern.MatchString(string(v))
 }
 
 func (o *Observation) Normalize() error {

@@ -43,8 +43,14 @@ export function ADTab({ taskId }: { taskId: string }) {
   }, [load]);
 
   const counts = React.useMemo(() => {
-    const result = { domain: 0, user: 0, group: 0, computer: 0 };
-    for (const entity of graph?.entities ?? []) result[entity.kind] += 1;
+    const result: Record<string, number> = {};
+    for (const entity of graph?.entities ?? []) result[entity.kind] = (result[entity.kind] ?? 0) + 1;
+    return result;
+  }, [graph]);
+
+  const relationCounts = React.useMemo(() => {
+    const result: Record<string, number> = {};
+    for (const edge of graph?.edges ?? []) result[edge.relation] = (result[edge.relation] ?? 0) + 1;
     return result;
   }, [graph]);
 
@@ -145,6 +151,22 @@ export function ADTab({ taskId }: { taskId: string }) {
               ))}
             </div>
           ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Attack-path relationship kinds</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-1 text-xs">
+          {Object.entries(relationCounts).map(([relation, count]) => (
+            <Badge key={relation} variant="outline">
+              {relation} {count}
+            </Badge>
+          ))}
+          {Object.keys(relationCounts).length === 0 ? (
+            <p className="text-muted-foreground text-sm">No attack-path relationships have been ingested.</p>
+          ) : null}
         </CardContent>
       </Card>
 

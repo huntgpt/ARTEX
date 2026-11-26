@@ -618,6 +618,7 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"secret_access_audit", `SELECT * FROM secret_access_audit WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"ad_collection_runs", `SELECT * FROM ad_collection_runs WHERE exploration_id=$1 ORDER BY id`, []any{expID}},
 		{"ad_collection_artifacts", `SELECT artifact.* FROM ad_collection_artifacts artifact JOIN ad_collection_runs run ON run.id=artifact.run_id WHERE run.exploration_id=$1 ORDER BY artifact.id`, []any{expID}},
+		{"red_team_phase_runs", `SELECT * FROM red_team_phase_runs WHERE exploration_id=$1 ORDER BY phase`, []any{expID}},
 		{"findings", `SELECT * FROM findings WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"finding_traffic_bindings", `SELECT b.* FROM finding_traffic_bindings b JOIN findings f ON f.id=b.finding_id WHERE f.task_id=$1 ORDER BY b.finding_id,b.position,b.id`, []any{taskID}},
 		{"traffic_evidence_snapshots", `SELECT s.* FROM traffic_evidence_snapshots s WHERE EXISTS(SELECT 1 FROM finding_traffic_bindings b JOIN findings f ON f.id=b.finding_id WHERE b.snapshot_id=s.id AND f.task_id=$1) ORDER BY s.id`, []any{taskID}},

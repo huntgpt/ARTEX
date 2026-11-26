@@ -21,13 +21,13 @@ func (t *ToolSet) ingestADObservation() actool.CoreTool {
 	const name = "ingest_ad_observation"
 	return actool.Build(actool.Spec{
 		Name: name,
-		Description: "Import an operator-supplied BloodHound/SharpHound JSON artifact into this task's private AD exploration graph. " +
+		Description: "Import an operator-supplied BloodHound/SharpHound JSON or normalized ARTEX AD/OpenGraph artifact into this task's private AD exploration graph. " +
 			"This tool only parses an existing file; it does not run a collector or contact a target. " +
 			"Only typed SIDs/GUIDs, object types and validated DNS hostnames become graph fields. Target-controlled text remains inert JSON detail. " +
 			"The path must be inside the current working directory; symlinks, hard links, non-regular files and files over 256 MiB are refused. " +
 			"Returns entity/relationship counts plus skipped, over-cap and truncation status.",
 		Schema: obj(map[string]any{
-			"format": map[string]any{"type": "string", "enum": []string{"bloodhound-json"}, "description": "collector artifact format"},
+			"format": map[string]any{"type": "string", "enum": []string{"bloodhound-json", "artex-ad-graph-json"}, "description": "collector artifact format"},
 			"path":   str("artifact path relative to the current working directory"),
 			"run_id": map[string]any{"type": "integer", "description": "optional existing approved/running AD collection run; omitted creates an audited operator-upload run"},
 		}, "format", "path"),
@@ -47,8 +47,8 @@ func (t *ToolSet) ingestADObservation() actool.CoreTool {
 				if err := json.Unmarshal(in, &input); err != nil {
 					return actool.Errorf("invalid input: " + err.Error()), nil
 				}
-				if input.Format != "bloodhound-json" || strings.TrimSpace(input.Path) == "" {
-					return actool.Errorf("format must be bloodhound-json and path is required"), nil
+				if (input.Format != "bloodhound-json" && input.Format != "artex-ad-graph-json") || strings.TrimSpace(input.Path) == "" {
+					return actool.Errorf("format must be bloodhound-json or artex-ad-graph-json and path is required"), nil
 				}
 				workingDir := ""
 				if tc != nil {
@@ -99,7 +99,12 @@ func (t *ToolSet) ingestADObservation() actool.CoreTool {
 					_ = t.ts.FinishADCollectionRun(ctx, runID, ad.RunFailed, db.ADIngestResult{}, "record artifact: "+err.Error())
 					return actool.Errorf("record AD artifact: " + err.Error()), nil
 				}
-				observation, err := ad.ParseBloodHound(io.LimitReader(file, scanMaxFileBytes))
+				var observation ad.Observation
+				if input.Format == "artex-ad-graph-json" {
+					observation, err = ad.ParseARTEXGraph(io.LimitReader(file, scanMaxFileBytes))
+				} else {
+					observation, err = ad.ParseBloodHound(io.LimitReader(file, scanMaxFileBytes))
+				}
 				if err != nil {
 					artifact.State, artifact.ErrorDetail = "rejected", "artifact could not be parsed"
 					_ = t.ts.AddADCollectionArtifact(ctx, runID, artifact)

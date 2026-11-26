@@ -2739,5 +2739,9 @@
   "No result summary": "Sonuç özeti yok",
   "No tool execution yet": "Henüz araç çalıştırılmadı",
   "Blocked reason": "Engelleme nedeni",
-  "Progress": "İlerleme"
+  "Progress": "İlerleme",
+  "Red-team workflow": "Red-team iş akışı",
+  "Dependency-aware phases show what ARTEX runs, what needs an operator, the active tool and any blocker.": "Bağımlılık farkındalıklı aşamalar ARTEX'in ne çalıştırdığını, nelerin operatör gerektirdiğini, etkin aracı ve engelleri gösterir.",
+  "Depends on": "Bağlı olduğu aşamalar",
+  "No workflow state yet": "Henüz iş akışı durumu yok"
 }

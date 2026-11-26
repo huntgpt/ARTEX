@@ -412,7 +412,7 @@ export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "
 
 export interface ADGraphEntity {
   key: string;
-  kind: "domain" | "user" | "group" | "computer";
+  kind: string;
   sid?: string;
   dns_hostname?: string;
   domain_sid?: string;
@@ -421,7 +421,7 @@ export interface ADGraphEntity {
 
 export interface ADGraphEdge {
   source_key: string;
-  relation: "member_of" | "admin_to" | "has_session";
+  relation: string;
   target_key: string;
   state: "observed" | "inferred";
 }
@@ -485,6 +485,24 @@ export interface TaskNode {
   source_task_id?: string;
   inherited?: boolean;
   delete_reason?: string; // deletion reason when the intent is soft-deleted (state='deleted')
+}
+
+export type RedTeamPhaseState = "pending" | "ready" | "running" | "blocked" | "complete" | "skipped" | "failed";
+
+export interface RedTeamPhaseRun {
+  phase: string;
+  label: string;
+  execution: "artex_automated" | "artex_agent" | "artex_operator_gate" | "artex_operator_assisted";
+  tools: string[];
+  dependencies: string[];
+  state: RedTeamPhaseState;
+  owner?: string;
+  tool?: string;
+  current_result?: string;
+  blocker_reason?: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at: string;
 }
 
 // One broadcast board page: nodes paginated by creation order + the edges involved on this

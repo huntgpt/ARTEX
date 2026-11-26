@@ -829,6 +829,25 @@ export const api = {
       cursor: r.cursor ?? 0,
     }));
   },
+  redTeamWorkflow: (id: string) =>
+    get<{ phases: import("@/lib/types").RedTeamPhaseRun[] }>(`/tasks/${id}/red-team-workflow`).then((r) => ({
+      phases: arr(r.phases),
+    })),
+  transitionRedTeamPhase: (
+    id: string,
+    phase: string,
+    body: {
+      state: import("@/lib/types").RedTeamPhaseState;
+      owner?: string;
+      tool?: string;
+      current_result?: string;
+      blocker_reason?: string;
+    },
+  ) =>
+    post<{ phases: import("@/lib/types").RedTeamPhaseRun[] }>(
+      `/tasks/${id}/red-team-workflow/${encodeURIComponent(phase)}/transition`,
+      body,
+    ),
   activityDetail: (id: number, task?: string) => get<{ detail: string }>(`/exploration/activity/${id}${tq(task)}`),
   // Reverse-paginated session history. session = "main" | "plan" | "intent:<id>".
   // before=0 → latest page; before=<id> → the older page ending before that id.
