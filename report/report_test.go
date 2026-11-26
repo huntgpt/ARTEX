@@ -233,6 +233,15 @@ func TestMarkdownDetailedReportFenceBalance(t *testing.T) {
 	}
 }
 
+func TestMarkdownMasksKnownSecretThirtyPercent(t *testing.T) {
+	secret := "P@ssw0rd"
+	node := reportNode(42, "high", "credential "+secret)
+	md := Markdown(Input{Title: "t", Findings: []*db.Node{node}, Quality: map[int64]db.FindingQuality{}, SecretValues: []string{secret}})
+	if strings.Contains(md, secret) || !strings.Contains(md, "P@ssw***") {
+		t.Fatalf("report did not apply the centralized secret mask: %s", md)
+	}
+}
+
 // The inlined detail body is capped so one finding cannot dominate the report,
 // and truncation never splits a multi-byte rune.
 func TestDetailedReportTruncation(t *testing.T) {

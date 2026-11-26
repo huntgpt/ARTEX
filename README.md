@@ -395,7 +395,7 @@ its own variable. The server percent-encodes it into the connection URL, so a pa
 literal `$`. The `ARTEX_PG_*` variables take the password raw; quote it in a shell.
 
 The image includes a scanner toolchain (`nmap`, `nuclei`, `httpx`, `katana`, `ffuf`, `dalfox`,
-`sqlmap`, `ripgrep`, `curl`, `npm`, …) and built-in `/app/skills`. The GHCR Compose file below
+`trufflehog`, `opendoor`, `sqlmap`, `ripgrep`, `curl`, `npm`, …) and built-in `/app/skills`. The GHCR Compose file below
 persists `./keys` and `./data`; it does not mount a host `skills/` directory, so the image's
 built-in skills are used.
 

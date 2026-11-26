@@ -84,6 +84,15 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if _, err := tx.Exec(`DELETE FROM findings WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM task_credentials WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM discovered_secrets WHERE task_id=$1`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM ad_collection_runs WHERE exploration_id=$1`, expID); err != nil {
+		return err
+	}
 	for _, statement := range []struct {
 		query string
 		args  []any
@@ -247,6 +256,11 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 			return nil, fmt.Errorf("restore %s: %w", table, err)
 		}
 	}
+	for _, table := range []string{"task_credentials", "discovered_secrets", "secret_access_audit", "ad_collection_runs", "ad_collection_artifacts"} {
+		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", table, err)
+		}
+	}
 	if warning, err := restoreTaskRelations(tx, taskID, remappedTables["task_relations"]); err != nil {
 		return nil, err
 	} else {
@@ -399,6 +413,8 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	allowed := map[string]bool{
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true,
+		"task_credentials": true, "discovered_secrets": true, "secret_access_audit": true,
+		"ad_collection_runs": true, "ad_collection_artifacts": true,
 		"llm_records": true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
 		"side_question_sessions": true, "side_question_requests": true,
 	}

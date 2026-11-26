@@ -41,6 +41,14 @@ func TestPoolProfilesOrder(t *testing.T) {
 	hi := mk("t-pool-hi", 9, false, "k2")
 	mk("t-pool-excluded", 99, true, "k3") // excluded despite the top priority
 	mk("t-pool-nokey", 50, false, "")     // no key → cannot serve anything
+	cliID, err := d.SaveProfile(&LLMProfile{
+		Name: "t-pool-cli" + sfx, Format: "codex-cli", Model: "test",
+		Priority: 5, CLIPath: "/usr/local/bin/codex", CLIConfigDir: "/secure/codex/account-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { deleteTestProfile(t, d, cliID) })
 
 	chain, err := d.PoolProfiles()
 	if err != nil {
@@ -55,10 +63,15 @@ func TestPoolProfilesOrder(t *testing.T) {
 			t.Fatal("pool_exclude profile entered the failover chain")
 		case "t-pool-nokey" + sfx:
 			t.Fatal("keyless profile entered the failover chain")
+		case "t-pool-cli" + sfx:
+			got = append(got, p.ID)
+			if p.CLIPath != "/usr/local/bin/codex" || p.CLIConfigDir != "/secure/codex/account-a" {
+				t.Fatalf("CLI profile fields not preserved: %+v", p)
+			}
 		}
 	}
-	if len(got) != 2 || got[0] != hi || got[1] != lo {
-		t.Fatalf("chain order = %v, want [hi=%d lo=%d]", got, hi, lo)
+	if len(got) != 3 || got[0] != hi || got[1] != cliID || got[2] != lo {
+		t.Fatalf("chain order = %v, want [hi=%d cli=%d lo=%d]", got, hi, cliID, lo)
 	}
 }
 

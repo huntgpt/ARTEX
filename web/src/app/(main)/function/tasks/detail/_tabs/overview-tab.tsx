@@ -21,15 +21,19 @@ import {
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
+import { intlLocale, t } from "@/i18n";
 import { api } from "@/lib/api";
+import { setVisibleInterval } from "@/lib/polling";
 import { taskAssetTypeLabel } from "@/lib/task-assets";
 import type {
+  Activity,
   AssetInterceptKind,
   AssetInterceptRule,
   Finding,
@@ -42,8 +46,6 @@ import type {
   TaskNode,
   TaskScopeRow,
 } from "@/lib/types";
-import { setVisibleInterval } from "@/lib/polling";
-import { intlLocale, t } from "@/i18n";
 
 // Compact token count formatting (12345 → 12.3k, 2000000 → 2M).
 function fmtTokens(n: number): string {
@@ -112,6 +114,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [stats, setStats] = React.useState<Stats | null>(null);
   const [intents, setIntents] = React.useState<TaskNode[]>([]);
   const [findings, setFindings] = React.useState<Finding[]>([]);
+  const [recentActivity, setRecentActivity] = React.useState<Activity[]>([]);
   const [coverage, setCoverage] = React.useState<{
     enabled: boolean;
     scope_rows: number;
@@ -361,11 +364,12 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       if (loading) return;
       loading = true;
       try {
-        const [taskResp, statsResp, intentsResp, findingsResp] = await Promise.all([
+        const [taskResp, statsResp, intentsResp, findingsResp, activityResp] = await Promise.all([
           api.task(taskId),
           api.stats(taskId),
           api.intents(taskId),
           api.findings(taskId),
+          api.activity(taskId, { latest: true, limit: 60 }),
         ]);
         if (cancelled) return;
         const activeTask = statsResp.active_task;
@@ -384,6 +388,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         setStats(statsResp);
         setIntents(intentsResp);
         setFindings(findingsResp);
+        setRecentActivity(activityResp.items);
         // coverage is independent + may 503 when no asset store — fetch separately so
         // its failure never blocks the others.
         api
@@ -423,6 +428,16 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const blocked = intents.filter((i) => i.state === "blocked");
   const taskFindings = findings.filter((f) => f.task_id === taskId);
   const goalsPct = task?.goals_total ? Math.round(((task.goals_met ?? 0) / task.goals_total) * 100) : 0;
+  const executionActivity = recentActivity
+    .filter((activity) => activity.kind === "tool_use" || activity.kind === "tool_result" || activity.is_error)
+    .slice(-12)
+    .reverse();
+  const latestByIntent = new Map<string, Activity>();
+  for (const activity of recentActivity) {
+    if (activity.intent_id && (activity.kind === "tool_use" || activity.kind === "tool_result")) {
+      latestByIntent.set(activity.intent_id, activity);
+    }
+  }
   // Token totals (across all models) for the card header overview.
   const tokenTotals = modelTokens.reduce(
     (acc, m) => {
@@ -577,7 +592,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             </div>
           ) : (
             <p className="text-muted-foreground text-sm">
-              {t("No goals yet. Once added, the planner dispatches exploration intents from them and judges completion.")}
+              {t(
+                "No goals yet. Once added, the planner dispatches exploration intents from them and judges completion.",
+              )}
             </p>
           )}
         </CardContent>
@@ -721,7 +738,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <TargetIcon className="size-4 text-emerald-500" /> {t("Asset test coverage")}
-              <span className="text-muted-foreground text-xs font-normal">{t("(rough estimate, for reference only)")}</span>
+              <span className="text-muted-foreground text-xs font-normal">
+                {t("(rough estimate, for reference only)")}
+              </span>
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
@@ -987,9 +1006,15 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
             {running.slice(0, 6).map((i) => (
-              <div key={i.id} className="flex items-center gap-2 text-sm">
+              <div key={i.id} className="flex flex-wrap items-center gap-2 text-sm">
                 <StatusBadge domain="intent" value={i.state} />
                 <span className="min-w-0 flex-1 truncate">{i.payload}</span>
+                {i.owner ? <Badge variant="outline">{i.owner}</Badge> : null}
+                {latestByIntent.get(i.id)?.tool ? (
+                  <code className="w-full truncate text-muted-foreground text-xs">
+                    {latestByIntent.get(i.id)?.tool}: {latestByIntent.get(i.id)?.summary}
+                  </code>
+                ) : null}
               </div>
             ))}
             {running.length === 0 && <p className="text-sm text-muted-foreground">{t("No running intents")}</p>}
@@ -1040,6 +1065,35 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         </Card>
       </div>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <ActivityIcon className="size-4 text-blue-500" /> {t("Current execution")}
+          </CardTitle>
+          <CardDescription>{t("Real agent, tool, result and timestamp from persisted task activity")}</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col divide-y">
+          {executionActivity.map((activity) => (
+            <div
+              key={activity.seq}
+              className="grid gap-1 py-2 text-sm sm:grid-cols-[9rem_10rem_1fr_auto] sm:items-center"
+            >
+              <Badge variant={activity.is_error ? "destructive" : "outline"}>{activity.worker || t("system")}</Badge>
+              <code className="truncate text-xs">{activity.tool || activity.kind}</code>
+              <span className="min-w-0 truncate text-muted-foreground">
+                {activity.summary || t("No result summary")}
+              </span>
+              <time className="text-muted-foreground text-xs">
+                {new Date(activity.ts).toLocaleTimeString(intlLocale)}
+              </time>
+            </div>
+          ))}
+          {executionActivity.length === 0 ? (
+            <p className="py-3 text-muted-foreground text-sm">{t("No tool execution yet")}</p>
+          ) : null}
+        </CardContent>
+      </Card>
+
       {/* Blocked intents — errored/blocked intents (e.g. LLM network issues) that can be re-run in one click: set back to open,
           a worker re-claims and re-runs from scratch (data already written to the graph is kept); a terminal/paused task is revived automatically. */}
       {blocked.length > 0 && (
@@ -1058,9 +1112,10 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
             {blocked.slice(0, 20).map((i) => (
-              <div key={i.id} className="flex items-center gap-2 text-sm">
+              <div key={i.id} className="flex flex-wrap items-center gap-2 text-sm">
                 <StatusBadge domain="intent" value={i.state} />
                 <span className="min-w-0 flex-1 truncate">{i.payload}</span>
+                {i.owner ? <Badge variant="outline">{i.owner}</Badge> : null}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -1071,6 +1126,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                   <RefreshCwIcon className={`size-3 ${rerunning.has(i.id) ? "animate-spin" : ""}`} />
                   {t("Re-run")}
                 </Button>
+                {i.blocked_reason ? (
+                  <p className="w-full rounded bg-destructive/5 px-2 py-1 text-destructive text-xs">
+                    {t("Blocked reason")}: {i.blocked_reason}
+                  </p>
+                ) : null}
               </div>
             ))}
             {blocked.length > 20 && (

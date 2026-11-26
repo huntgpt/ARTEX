@@ -409,6 +409,65 @@ export interface Company {
 export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint" | "digest";
 export type GoalState = "open" | "met" | "abandoned";
 export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
+
+export interface ADGraphEntity {
+  key: string;
+  kind: "domain" | "user" | "group" | "computer";
+  sid?: string;
+  dns_hostname?: string;
+  domain_sid?: string;
+  state: "observed" | "inferred";
+}
+
+export interface ADGraphEdge {
+  source_key: string;
+  relation: "member_of" | "admin_to" | "has_session";
+  target_key: string;
+  state: "observed" | "inferred";
+}
+
+export interface ADGraph {
+  entities: ADGraphEntity[];
+  edges: ADGraphEdge[];
+  entity_count: number;
+  edge_count: number;
+}
+
+export interface ADCollectionArtifact {
+  id: number;
+  run_id: number;
+  kind: string;
+  logical_path: string;
+  sha256: string;
+  byte_size: number;
+  state: "received" | "ingested" | "rejected" | "failed";
+  error_detail?: string;
+  created_at: string;
+}
+
+export interface ADCollectionRun {
+  id: number;
+  exploration_id: number;
+  collector: string;
+  mode: string;
+  state: "queued" | "approved" | "running" | "ingesting" | "complete" | "partial" | "rejected" | "failed" | "cancelled";
+  requested_by: string;
+  approved_by: string;
+  blocker_reason?: string;
+  error_detail?: string;
+  records: number;
+  entities: number;
+  edges: number;
+  skipped: number;
+  over_cap: number;
+  truncated: boolean;
+  created_at: string;
+  approved_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at: string;
+  artifacts?: ADCollectionArtifact[];
+}
 export type FindingState = "confirmed" | "dismissed";
 export type HintState = "active" | "consumed";
 export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
@@ -420,6 +479,8 @@ export interface TaskNode {
   priority: number; // 0..10
   state: string; // GoalState | IntentState | FindingState | HintState
   origin: string;
+  owner?: string;
+  blocked_reason?: string;
   ts: string;
   source_task_id?: string;
   inherited?: boolean;
@@ -1160,11 +1221,13 @@ export interface NotificationDelivery {
 export interface LLMProfile {
   id: string;
   name: string;
-  format: "openai" | "anthropic" | "openai-responses" | "ollama" | "bedrock-gateway";
+  format: "openai" | "anthropic" | "openai-responses" | "ollama" | "bedrock-gateway" | "claude-cli" | "codex-cli";
   base_url?: string;
   proxy?: string;
   model: string;
   api_key_hint?: string;
+  cli_path?: string;
+  cli_config_dir?: string;
   rate_per_second: number;
   rate_per_minute: number;
   context_window_k?: number;
@@ -1458,6 +1521,29 @@ export type TaskCredential = TaskCredentialInput & {
   updated_at: string;
 };
 
+export interface DiscoveredSecret {
+  id: number;
+  task_id: number;
+  detector: string;
+  source_type: string;
+  source_name: string;
+  repository: string;
+  file_path: string;
+  line_number: number;
+  commit_hash: string;
+  verified: boolean;
+  masked_value: string;
+  secret_sha256: string;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RevealedSecret {
+  id: number;
+  value: string;
+  value_v2: string;
+}
 
 export interface AssetInterceptRule {
   id: number;

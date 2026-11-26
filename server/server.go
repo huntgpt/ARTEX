@@ -32,6 +32,7 @@ import (
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/artex/redact"
 	"github.com/Autumn-27/artex/report"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/norma/llm"
@@ -425,6 +426,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 		return agent.Config{}, false
 	}
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	cfg.CLIPath, cfg.CLIConfigDir = p.CLIPath, p.CLIConfigDir
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
@@ -611,6 +613,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 		return agent.Config{}, false
 	}
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
+	cfg.CLIPath, cfg.CLIConfigDir = p.CLIPath, p.CLIConfigDir
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
@@ -812,6 +815,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/credentials", s.listTaskCredentials)
 	mux.HandleFunc("POST /api/tasks/{id}/credentials", s.addTaskCredential)
 	mux.HandleFunc("DELETE /api/tasks/{id}/credentials/{cid}", s.deleteTaskCredential)
+	mux.HandleFunc("GET /api/tasks/{id}/secrets", s.listTaskDiscoveredSecrets)
+	mux.HandleFunc("POST /api/tasks/{id}/secrets/{sid}/reveal", s.revealTaskDiscoveredSecret)
 	mux.HandleFunc("POST /api/tasks/{id}/archive", s.queueTaskArchive)
 	mux.HandleFunc("POST /api/tasks/archive/batch", s.queueTaskArchivesBatch)
 	mux.HandleFunc("POST /api/task-archives/{id}/restore", s.queueTaskArchiveRestore)
@@ -819,6 +824,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/task-archives/{id}", s.queueTaskArchiveDelete)
 	mux.HandleFunc("POST /api/task-archives/delete/batch", s.deleteTaskArchivesBatch)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage", s.taskCoverage)
+	mux.HandleFunc("GET /api/tasks/{id}/ad/graph", s.taskADGraph)
+	mux.HandleFunc("GET /api/tasks/{id}/ad/runs", s.taskADRuns)
+	mux.HandleFunc("POST /api/tasks/{id}/ad/runs", s.createTaskADRun)
+	mux.HandleFunc("POST /api/tasks/{id}/ad/runs/{run}/transition", s.transitionTaskADRun)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)
@@ -1583,6 +1592,8 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		SessionHeaderKey string `json:"session_header_key"` // non-empty = the test also sends this custom session header, with a one-off random session id as the value
 		UserAgent        string `json:"user_agent"`         // non-empty = the test overrides the User-Agent header with this value (mirrors production)
 		CustomHeaders    string `json:"custom_headers"`
+		CLIPath          string `json:"cli_path"`
+		CLIConfigDir     string `json:"cli_config_dir"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1630,8 +1641,15 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.ReasoningEffort) == "" {
 			req.ReasoningEffort = stored.ReasoningEffort
 		}
+		if strings.TrimSpace(req.CLIPath) == "" {
+			req.CLIPath = stored.CLIPath
+		}
+		if strings.TrimSpace(req.CLIConfigDir) == "" {
+			req.CLIConfigDir = stored.CLIConfigDir
+		}
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
+	cfg.CLIPath, cfg.CLIConfigDir = req.CLIPath, req.CLIConfigDir
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
 	cfg.ThinkingType = req.ThinkingType
@@ -2517,6 +2535,17 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	var findingTaskIDs []int64
+	for _, finding := range fs {
+		if finding.TaskID != nil {
+			findingTaskIDs = append(findingTaskIDs, *finding.TaskID)
+		}
+	}
+	secretValues, err := s.m.pg.ReportSecretValuesForTasks(findingTaskIDs)
+	if err != nil {
+		writeErr(w, 500, "export unavailable: secret masking failed")
+		return
+	}
 
 	stage, err := os.MkdirTemp("", "artex-finding-export-")
 	if err != nil {
@@ -2538,10 +2567,10 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	switch format {
 	case "md-single":
 		setDownload("text/markdown; charset=utf-8", "findings-"+stamp+".md")
-		_, _ = w.Write([]byte(report.FindingsMarkdown(fs, now)))
+		_, _ = w.Write([]byte(redact.KnownSecrets(report.FindingsMarkdown(fs, now), secretValues)))
 	case "md-zip":
 		path := filepath.Join(stage, "findings.zip")
-		if err := buildFindingsEvidenceZip(path, fs, stage, now); err != nil {
+		if err := buildFindingsEvidenceZip(path, fs, stage, now, secretValues); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -2555,7 +2584,7 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "findings.zip", now, file)
 	case "csv":
 		setDownload("text/csv; charset=utf-8", "findings-"+stamp+".csv")
-		_, _ = w.Write(report.FindingsCSV(fs))
+		_, _ = w.Write([]byte(redact.KnownSecrets(string(report.FindingsCSV(fs)), secretValues)))
 	case "json":
 		assets := s.resolveFindingAssets(fs)
 		out := make([]FindingDTO, 0, len(fs))
@@ -2567,9 +2596,8 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 			out = append(out, findingFromDB(f, assets))
 		}
 		setDownload("application/json; charset=utf-8", "findings-"+stamp+".json")
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(out)
+		raw, _ := json.MarshalIndent(out, "", "  ")
+		_, _ = w.Write([]byte(redact.KnownSecrets(string(raw), secretValues) + "\n"))
 	default:
 		writeErr(w, 400, "bad format: "+format)
 	}
@@ -3153,7 +3181,14 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		cursor int64
 		err    error
 	)
-	if intentPtr != nil {
+	if r.URL.Query().Get("latest") == "true" && intentPtr == nil && since <= 0 {
+		var hasMore bool
+		items, hasMore, err = t.Store.ActivityPage(db.ActivitySessionFilter{}, 0, min(limit, 500))
+		_ = hasMore
+		if len(items) > 0 {
+			cursor = items[len(items)-1].ID
+		}
+	} else if intentPtr != nil {
 		items, cursor, err = t.Store.ActivityListWithSources(*intentPtr, since, limit)
 	} else {
 		items, cursor, err = t.Store.ActivityList(nil, since, limit)
@@ -4615,10 +4650,19 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var secretValues []string
+	if s.m.pg != nil {
+		var err error
+		if secretValues, err = s.m.pg.ReportSecretValues(taskID); err != nil {
+			log.Printf("[report] task=%s secret masking: %v", t.ID, err)
+			writeErr(w, 500, "report unavailable: secret masking failed, retry")
+			return
+		}
+	}
 	md := report.Markdown(report.Input{
 		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
 		AssetCounts: counts, Findings: findings, Coverage: ledger,
-		Quality: quality,
+		Quality: quality, SecretValues: secretValues,
 	})
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.WriteHeader(200)

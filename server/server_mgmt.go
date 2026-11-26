@@ -2134,6 +2134,23 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	p.APIKey = body.APIKey
 	p.CustomHeaders = body.CustomHeaders
 	p.ClearCustomHeaders = body.ClearCustomHeaders
+	localCLI := p.Format == "claude-cli" || p.Format == "codex-cli"
+	if localCLI {
+		// OAuth material remains in the CLI-owned directory. API/gateway fields
+		// are rejected/cleared so a local profile cannot accidentally retain a
+		// cloud bearer token or proxy from a previous format.
+		p.APIKey, p.APIKeyHint, p.BaseURL, p.Proxy = "", "", "", ""
+		p.CustomHeaders, p.UserAgent, p.SessionHeaderKey = "", "", ""
+		p.ClearCustomHeaders = true
+		validate := agent.ConfigFrom(p.Format, p.Model, "", "", "")
+		validate.CLIPath, validate.CLIConfigDir = p.CLIPath, p.CLIConfigDir
+		if _, err := validate.NewProvider(); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	} else {
+		p.CLIPath, p.CLIConfigDir = "", ""
+	}
 	if p.Format == "bedrock-gateway" {
 		if _, err := agent.ParseBedrockGatewayHeaders(p.CustomHeaders); err != nil {
 			writeErr(w, 400, err.Error())

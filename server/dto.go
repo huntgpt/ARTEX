@@ -192,28 +192,32 @@ func trafficDTOs(ex []traffic.ExchangeMeta) []TrafficExchangeDTO {
 // ---- TaskNode (frontend "TaskNode") — frontier, intents, exploration graph nodes ----
 
 type TaskNodeDTO struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"` // db Node.Kind
-	Payload      string `json:"payload,omitempty"`
-	Priority     int    `json:"priority"`
-	State        string `json:"state"`
-	Origin       string `json:"origin"`
-	TS           string `json:"ts"`
-	SourceTaskID string `json:"source_task_id,omitempty"`
-	Inherited    bool   `json:"inherited,omitempty"`
-	DeleteReason string `json:"delete_reason,omitempty"` // deletion reason when the intent is soft-deleted (state='deleted')
+	ID            string `json:"id"`
+	Type          string `json:"type"` // db Node.Kind
+	Payload       string `json:"payload,omitempty"`
+	Priority      int    `json:"priority"`
+	State         string `json:"state"`
+	Origin        string `json:"origin"`
+	Owner         string `json:"owner,omitempty"`
+	BlockedReason string `json:"blocked_reason,omitempty"`
+	TS            string `json:"ts"`
+	SourceTaskID  string `json:"source_task_id,omitempty"`
+	Inherited     bool   `json:"inherited,omitempty"`
+	DeleteReason  string `json:"delete_reason,omitempty"` // deletion reason when the intent is soft-deleted (state='deleted')
 }
 
 func taskNodeDTO(n *db.Node) TaskNodeDTO {
 	d := TaskNodeDTO{
-		ID:           i64s(n.ID),
-		Type:         n.Kind,
-		Payload:      rawString(n.Payload),
-		DeleteReason: n.DeleteReason,
-		Priority:     n.Priority,
-		State:        n.State,
-		Origin:       n.Origin,
-		TS:           rfc3339(n.CreatedAt),
+		ID:            i64s(n.ID),
+		Type:          n.Kind,
+		Payload:       rawString(n.Payload),
+		DeleteReason:  n.DeleteReason,
+		Priority:      n.Priority,
+		State:         n.State,
+		Origin:        n.Origin,
+		Owner:         n.Owner,
+		BlockedReason: n.BlockedReason,
+		TS:            rfc3339(n.CreatedAt),
 	}
 	if n.SourceTaskID > 0 {
 		d.SourceTaskID = i64s(n.SourceTaskID)
@@ -622,6 +626,8 @@ type LLMProfileDTO struct {
 	ProxySet        bool    `json:"proxy_set"`
 	Model           string  `json:"model"`
 	APIKeyHint      string  `json:"api_key_hint,omitempty"`
+	CLIPath         string  `json:"cli_path,omitempty"`
+	CLIConfigDir    string  `json:"cli_config_dir,omitempty"`
 	RatePerSecond   float64 `json:"rate_per_second"`
 	RatePerMinute   float64 `json:"rate_per_minute"`
 	ContextWindowK  int     `json:"context_window_k"`
@@ -662,6 +668,8 @@ func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 		ProxySet:         p.Proxy != "",
 		Model:            p.Model,
 		APIKeyHint:       p.APIKeyHint,
+		CLIPath:          p.CLIPath,
+		CLIConfigDir:     p.CLIConfigDir,
 		RatePerSecond:    p.RatePerSecond,
 		RatePerMinute:    p.RatePerMinute,
 		ContextWindowK:   p.ContextWindowK,

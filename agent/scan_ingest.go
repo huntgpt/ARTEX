@@ -38,6 +38,7 @@ type scanIngest struct {
 	hosts, urls                                map[string]bool
 	Assets                                     []assetInputItem
 	Facts                                      []factItem
+	Secrets                                    []db.DiscoveredSecretInput
 	Notable                                    map[string][]string
 }
 
@@ -503,4 +504,258 @@ func (s *scanIngest) addFfuf(raw json.RawMessage) {
 	s.note("urls", fmt.Sprintf("%s %d", u, r.Status))
 	s.fact(fmt.Sprintf("ffuf: %s returned status %d, %d bytes, %d words, %d lines", u, r.Status, r.Length, r.Words, r.Lines),
 		map[string]any{"input": r.Input, "redirectlocation": stripUserinfo(r.Redirect)})
+}
+
+// ---- TruffleHog -j ----
+
+type truffleHogResult struct {
+	DetectorName   string          `json:"DetectorName"`
+	DetectorType   json.RawMessage `json:"DetectorType"`
+	SourceType     json.RawMessage `json:"SourceType"`
+	SourceName     string          `json:"SourceName"`
+	Verified       bool            `json:"Verified"`
+	Raw            string          `json:"Raw"`
+	RawV2          string          `json:"RawV2"`
+	Redacted       string          `json:"Redacted"`
+	SourceMetadata json.RawMessage `json:"SourceMetadata"`
+}
+
+// truffleString turns the scanner's string or numeric enum into a stable label.
+func truffleString(raw json.RawMessage) string {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) == nil {
+		return number.String()
+	}
+	return ""
+}
+
+// findJSONScalar searches scanner metadata for a location field. It is used
+// only for a small allow-list; the complete metadata is deliberately not put in
+// a fact because it may contain credentials or attacker-controlled text.
+func findJSONScalar(v any, names ...string) string {
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		wanted[strings.ToLower(name)] = true
+	}
+	var walk func(any) string
+	walk = func(current any) string {
+		switch value := current.(type) {
+		case map[string]any:
+			for key, item := range value {
+				if !wanted[strings.ToLower(key)] {
+					continue
+				}
+				switch scalar := item.(type) {
+				case string:
+					return scalar
+				case json.Number:
+					return scalar.String()
+				case float64:
+					return strconv.FormatFloat(scalar, 'f', -1, 64)
+				}
+			}
+			for _, item := range value {
+				if found := walk(item); found != "" {
+					return found
+				}
+			}
+		case []any:
+			for _, item := range value {
+				if found := walk(item); found != "" {
+					return found
+				}
+			}
+		}
+		return ""
+	}
+	return walk(v)
+}
+
+func (s *scanIngest) addTruffleHog(line []byte) {
+	if s.full() {
+		return
+	}
+	var result truffleHogResult
+	if json.Unmarshal(line, &result) != nil || strings.TrimSpace(result.DetectorName) == "" || result.Raw == "" {
+		s.Skipped++
+		return
+	}
+	var metadata any
+	decoder := json.NewDecoder(bytes.NewReader(result.SourceMetadata))
+	decoder.UseNumber()
+	_ = decoder.Decode(&metadata)
+	repository := findJSONScalar(metadata, "repository", "repositoryurl", "repo")
+	filePath := findJSONScalar(metadata, "file", "filepath", "path")
+	commit := findJSONScalar(metadata, "commit", "commithash", "commitid")
+	lineNumber, _ := strconv.Atoi(findJSONScalar(metadata, "line", "linenumber"))
+	if lineNumber < 0 {
+		lineNumber = 0
+	}
+	location := strings.Trim(strings.Join([]string{repository, filePath}, "/"), "/")
+	if location == "" {
+		location = strings.TrimSpace(result.SourceName)
+	}
+	if location == "" {
+		location = "unknown location"
+	}
+	state := "unverified"
+	if result.Verified {
+		state = "verified"
+	}
+	locationMetadata, _ := json.Marshal(map[string]any{
+		"repository":  repository,
+		"file_path":   filePath,
+		"line_number": lineNumber,
+		"commit_hash": commit,
+	})
+	s.Events++
+	s.Secrets = append(s.Secrets, db.DiscoveredSecretInput{
+		Detector:        strings.TrimSpace(result.DetectorName),
+		SourceType:      truffleString(result.SourceType),
+		SourceName:      strings.TrimSpace(result.SourceName),
+		Repository:      repository,
+		FilePath:        filePath,
+		LineNumber:      lineNumber,
+		CommitHash:      commit,
+		Verified:        result.Verified,
+		SecretValue:     result.Raw,
+		SecretValueV2:   result.RawV2,
+		ScannerRedacted: result.Redacted,
+		Metadata:        locationMetadata,
+	})
+	s.note("secrets", fmt.Sprintf("%s (%s) at %s", result.DetectorName, state, location))
+	s.fact(fmt.Sprintf("trufflehog: %s secret candidate (%s) at %s", bbotToken(result.DetectorName), state, location),
+		map[string]any{"detector": result.DetectorName, "verified": result.Verified, "repository": repository,
+			"file_path": filePath, "line_number": lineNumber, "commit_hash": commit})
+}
+
+// ---- OpenDoor --json ----
+
+type openDoorResult struct {
+	URL      string          `json:"url"`
+	Size     scanInt         `json:"size"`
+	Code     scanInt         `json:"code"`
+	Status   scanInt         `json:"status"`
+	Metadata json.RawMessage `json:"metadata"`
+}
+
+type scanInt int64
+
+func (value *scanInt) UnmarshalJSON(raw []byte) error {
+	var number int64
+	if json.Unmarshal(raw, &number) == nil {
+		*value = scanInt(number)
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return err
+	}
+	text = strings.TrimSpace(text)
+	end := 0
+	for end < len(text) && text[end] >= '0' && text[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		*value = 0
+		return nil
+	}
+	parsed, err := strconv.ParseInt(text[:end], 10, 64)
+	if err != nil {
+		return err
+	}
+	*value = scanInt(parsed)
+	return nil
+}
+
+func decodeOpenDoorItems(raw json.RawMessage) ([]openDoorResult, error) {
+	var direct []openDoorResult
+	if err := json.Unmarshal(raw, &direct); err == nil {
+		return direct, nil
+	}
+	var grouped map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &grouped); err != nil {
+		return nil, err
+	}
+	var out []openDoorResult
+	for bucket, encoded := range grouped {
+		var items []openDoorResult
+		if err := json.Unmarshal(encoded, &items); err == nil {
+			out = append(out, items...)
+			continue
+		}
+		var urls []string
+		if err := json.Unmarshal(encoded, &urls); err != nil {
+			return nil, err
+		}
+		var code scanInt
+		_ = code.UnmarshalJSON([]byte(strconv.Quote(bucket)))
+		for _, endpoint := range urls {
+			out = append(out, openDoorResult{URL: endpoint, Code: code})
+		}
+	}
+	return out, nil
+}
+
+func readOpenDoorJSON(r io.Reader, s *scanIngest) error {
+	var document struct {
+		Items         json.RawMessage `json:"items"`
+		ReportItems   json.RawMessage `json:"report_items"`
+		FilteredItems json.RawMessage `json:"filtered_items"`
+	}
+	decoder := json.NewDecoder(r)
+	if err := decoder.Decode(&document); err != nil {
+		return err
+	}
+	raw := document.ReportItems
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		raw = document.Items
+	}
+	items, err := decodeOpenDoorItems(raw)
+	if err != nil {
+		return errors.New("items are not an array or status map")
+	}
+	for _, item := range items {
+		s.addOpenDoor(item)
+	}
+	if len(bytes.TrimSpace(document.FilteredItems)) > 0 && !bytes.Equal(bytes.TrimSpace(document.FilteredItems), []byte("null")) {
+		if filtered, err := decodeOpenDoorItems(document.FilteredItems); err == nil {
+			s.Skipped += len(filtered)
+		}
+	}
+	return nil
+}
+
+func (s *scanIngest) addOpenDoor(result openDoorResult) {
+	if s.full() {
+		return
+	}
+	endpoint, host := scanURL(result.URL)
+	if endpoint == "" {
+		s.Skipped++
+		return
+	}
+	status := int(result.Code)
+	if status == 0 {
+		status = int(result.Status)
+	}
+	s.Events++
+	s.hosts[host] = true
+	s.urls[endpoint] = true
+	asset := assetInputItem{Type: "service", URL: endpoint}
+	if status > 0 {
+		asset.StatusCode = &status
+	}
+	contentLength := int64(result.Size)
+	if contentLength > 0 {
+		asset.ContentLength = &contentLength
+	}
+	s.Assets = append(s.Assets, asset)
+	s.note("urls", fmt.Sprintf("%s %d", endpoint, status))
+	s.fact(fmt.Sprintf("opendoor: %s returned status %d and %d bytes", endpoint, status, contentLength),
+		map[string]any{"metadata": result.Metadata})
 }

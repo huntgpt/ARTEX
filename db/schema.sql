@@ -370,7 +370,7 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS llm_profiles (
     id               BIGSERIAL PRIMARY KEY,
     name             TEXT NOT NULL UNIQUE,
-    format           TEXT NOT NULL CHECK (format IN ('openai','anthropic','openai-responses','ollama','bedrock-gateway')),
+    format           TEXT NOT NULL CHECK (format IN ('openai','anthropic','openai-responses','ollama','bedrock-gateway','claude-cli','codex-cli')),
     base_url         TEXT,
     proxy            TEXT,
     model            TEXT NOT NULL,
@@ -406,6 +406,10 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     -- Custom User-Agent: when non-empty, every outbound LLM request overrides the User-Agent header with this value. ''=do not override (keep the default UA).
     user_agent       TEXT NOT NULL DEFAULT '',
     custom_headers   TEXT NOT NULL DEFAULT '',
+    -- Local CLI providers keep OAuth credentials outside ARTEX. Only these
+    -- operator-selected paths are persisted; tokens remain owned by the CLI.
+    cli_path         TEXT NOT NULL DEFAULT '',
+    cli_config_dir   TEXT NOT NULL DEFAULT '',
     -- Retry overrides: attempts 0=use global default / -1=disable / >0=use this value; interval 0=use default exponential backoff / >0=fixed milliseconds.
     -- The three groups correspond to connect retry, empty-response retry, and same-provider safe-window retry; see the ALTER comment below.
     retry_connect_attempts    INTEGER NOT NULL DEFAULT 0,

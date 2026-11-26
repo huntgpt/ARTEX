@@ -87,6 +87,9 @@ ARG FFUF_SHA256_ARM64=e2d712615d53da797ee929006e41f2df5a7960a5353133db9c150ddaa2
 ARG DALFOX_VERSION=v3.2.4
 ARG DALFOX_SHA256_AMD64=c11cfd2f8261973f0a2a2a1eba5a147ce77712a29acfa6343f9847fb8bb7eca2
 ARG DALFOX_SHA256_ARM64=fd56b0b7da2d06868cd73b504f41d21314629feffcd5bdc97718db1c9dd2fa70
+ARG TRUFFLEHOG_VERSION=v3.100.1
+ARG TRUFFLEHOG_SHA256_AMD64=b2460688116f29ce33f1afe16d14fef3fa3db928e74ba55a6c9fed392c60ad69
+ARG TRUFFLEHOG_SHA256_ARM64=017b4f2124199c164579caff85c07839be1c79f6e5908b0f1dd3bccc775c6452
 ARG SQLMAP_VERSION=1.9.9
 ARG SQLMAP_COMMIT=cceda39208b5aad478de2c3f731df4239d9881f6
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -97,11 +100,13 @@ RUN set -eux; \
       amd64) PD_ARCH=amd64; FFUF_ARCH=amd64; DALFOX_ARCH=x86_64; \
              NUCLEI_SUM="$NUCLEI_SHA256_AMD64"; HTTPX_SUM="$HTTPX_SHA256_AMD64"; \
              SUBFINDER_SUM="$SUBFINDER_SHA256_AMD64"; KATANA_SUM="$KATANA_SHA256_AMD64"; \
-             FFUF_SUM="$FFUF_SHA256_AMD64"; DALFOX_SUM="$DALFOX_SHA256_AMD64" ;; \
+             FFUF_SUM="$FFUF_SHA256_AMD64"; DALFOX_SUM="$DALFOX_SHA256_AMD64"; \
+             TRUFFLEHOG_SUM="$TRUFFLEHOG_SHA256_AMD64" ;; \
       arm64) PD_ARCH=arm64; FFUF_ARCH=arm64; DALFOX_ARCH=aarch64; \
              NUCLEI_SUM="$NUCLEI_SHA256_ARM64"; HTTPX_SUM="$HTTPX_SHA256_ARM64"; \
              SUBFINDER_SUM="$SUBFINDER_SHA256_ARM64"; KATANA_SUM="$KATANA_SHA256_ARM64"; \
-             FFUF_SUM="$FFUF_SHA256_ARM64"; DALFOX_SUM="$DALFOX_SHA256_ARM64" ;; \
+             FFUF_SUM="$FFUF_SHA256_ARM64"; DALFOX_SUM="$DALFOX_SHA256_ARM64"; \
+             TRUFFLEHOG_SUM="$TRUFFLEHOG_SHA256_ARM64" ;; \
       *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out; \
@@ -128,6 +133,8 @@ RUN set -eux; \
       "ffuf_${FFUF_VERSION#v}_linux_${FFUF_ARCH}.tar.gz" "$FFUF_SUM" ffuf; \
     fetch "$gh/hahwul/dalfox/releases/download/$DALFOX_VERSION" \
       "dalfox-${DALFOX_VERSION}-linux-${DALFOX_ARCH}-musl.tar.gz" "$DALFOX_SUM" dalfox; \
+    fetch "$gh/trufflesecurity/trufflehog/releases/download/$TRUFFLEHOG_VERSION" \
+      "trufflehog_${TRUFFLEHOG_VERSION#v}_linux_${PD_ARCH}.tar.gz" "$TRUFFLEHOG_SUM" trufflehog; \
     git clone --quiet --depth 1 --branch "$SQLMAP_VERSION" https://github.com/sqlmapproject/sqlmap /opt/sqlmap; \
     commit="$(git -C /opt/sqlmap rev-parse HEAD)"; \
     if [ "$commit" != "$SQLMAP_COMMIT" ]; then echo "sqlmap commit mismatch: want $SQLMAP_COMMIT got $commit" >&2; exit 1; fi; \
@@ -209,7 +216,7 @@ ENV NUCLEI_TEMPLATES_DIR=/opt/nuclei-templates \
 RUN set -eux; \
     ln -s /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap; \
     nuclei -version >/dev/null; httpx -version; subfinder -version; katana -version; \
-    ffuf -V >/dev/null; dalfox --version >/dev/null; sqlmap --version >/dev/null; \
+    ffuf -V >/dev/null; dalfox --version >/dev/null; trufflehog --version >/dev/null; sqlmap --version >/dev/null; \
     templates="$(nuclei -tl -silent -duc | wc -l)"; \
     echo "nuclei templates visible at build time: $templates"; \
     test "$templates" -gt 10000
@@ -240,6 +247,23 @@ RUN set -eux; \
     bbot --dry-run -t example.com -m wafw00f,paramminer_getparams,lightfuzz,sslcert,gowitness,retirejs >/dev/null 2>&1 || true; \
     bbot --dry-run -t example.com -m wafw00f,paramminer_getparams,lightfuzz,sslcert,gowitness,retirejs --no-color >/tmp/bbot-dry.log 2>&1 || true; \
     ! grep -qE "Installing|ERRR|CRITICAL" /tmp/bbot-dry.log || { cat /tmp/bbot-dry.log; exit 1; }
+
+# OpenDoor directory discovery is isolated in its own venv. Every PyPI wheel and
+# dependency is version- and hash-pinned so rebuilding the image cannot silently
+# pick up different scanner code.
+ARG OPENDOOR_VERSION=5.18.0
+RUN set -eux; \
+    python -m venv /opt/opendoor; \
+    printf '%s\n' \
+      "opendoor==${OPENDOOR_VERSION} --hash=sha256:98a1fa9f47366f05efebb67b2b00b616cd11dfa00d3fedce4726edff5dd85fb7" \
+      'packaging==26.2 --hash=sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e' \
+      'urllib3==2.7.0 --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897' \
+      'PySocks==1.7.1 --hash=sha256:2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5' \
+      >/tmp/opendoor-requirements.txt; \
+    /opt/opendoor/bin/pip install --no-cache-dir --only-binary=:all: --require-hashes -r /tmp/opendoor-requirements.txt; \
+    rm -f /tmp/opendoor-requirements.txt; \
+    ln -s /opt/opendoor/bin/opendoor /usr/local/bin/opendoor; \
+    opendoor --version | grep -F "Opendoor scanner: ${OPENDOOR_VERSION}"
 
 
 # Preinstall Playwright MCP and CLI (globally) so no network download is needed at runtime.

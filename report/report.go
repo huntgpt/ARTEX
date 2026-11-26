@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/redact"
 )
 
 // Input bundles what the report needs.
@@ -33,6 +34,10 @@ type Input struct {
 	// row exists. Collapsing failure into absence would turn a database error into a
 	// statement about the finding.
 	Quality map[int64]db.FindingQuality
+
+	// SecretValues are used only by the final replacement pass. They are never
+	// printed verbatim; reports consistently mask the final 30 percent.
+	SecretValues []string
 }
 
 // reportMaxGaps caps the coverage gap list of the report; the rest is counted.
@@ -130,7 +135,7 @@ func Markdown(in Input) string {
 		b.WriteString("\n")
 	}
 
-	return b.String()
+	return redact.KnownSecrets(b.String(), in.SecretValues)
 }
 
 func nz(s, d string) string {

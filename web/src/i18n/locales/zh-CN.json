@@ -2724,5 +2724,20 @@
   "Search company…": "搜索企业…",
   "Failed to load companies": "加载企业失败",
   "No company found": "未找到企业",
-  "Manage companies": "管理企业"
+  "Manage companies": "管理企业",
+  "Reason for revealing this secret (recorded in audit log)": "查看此密钥的原因（将记录到审计日志）",
+  "Discovered secrets": "已发现的密钥",
+  "TruffleHog results are encrypted at rest. Values stay 30% masked until an audited reveal action.": "TruffleHog 结果以静态加密方式存储。在执行经审计的查看操作前，数值保持 30% 掩码。",
+  "No discovered secrets": "暂无已发现的密钥",
+  "verified": "已验证",
+  "unverified": "未验证",
+  "unknown location": "未知位置",
+  "Reveal or hide secret": "显示或隐藏密钥",
+  "Current execution": "当前执行",
+  "Real agent, tool, result and timestamp from persisted task activity": "来自持久化任务活动的真实代理、工具、结果和时间戳",
+  "system": "系统",
+  "No result summary": "暂无结果摘要",
+  "No tool execution yet": "尚未执行工具",
+  "Blocked reason": "阻塞原因",
+  "Progress": "进度"
 }

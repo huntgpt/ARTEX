@@ -28,11 +28,11 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { t } from "@/i18n";
 import { api } from "@/lib/api";
+import { setVisibleInterval } from "@/lib/polling";
 import type { LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
-import { setVisibleInterval } from "@/lib/polling";
 
 // Renders a translated string, turning <b>…</b> spans into bold elements, so a sentence with emphasis stays one key.
 function rich(s: string): React.ReactNode[] {
@@ -62,12 +62,21 @@ const MAX_TOKENS_FIELD_HINTS: Record<string, string> = {
     "Which key carries the cap. max_tokens is the default and the vast majority of compatible gateways only accept it; OpenAI's official reasoning models (the o series / GPT-5) conversely only accept max_completion_tokens and fail outright with unsupported_parameter when they receive max_tokens.",
   ),
   anthropic: t("Only selectable for the openai format. Anthropic's field name is fixed as max_tokens."),
-  "openai-responses": t("Only selectable for the openai format. The Responses API's field name is fixed as max_output_tokens."),
+  "openai-responses": t(
+    "Only selectable for the openai format. The Responses API's field name is fixed as max_output_tokens.",
+  ),
   ollama: t("Only selectable for the openai format. Ollama's field name is fixed as max_tokens."),
 };
 // LLM profile formats. The default in the create form is "anthropic"; "ollama" is the
 // keyless local-server format (base URL defaults to http://127.0.0.1:11434/v1).
-type ProfileFormat = "anthropic" | "openai" | "openai-responses" | "ollama" | "bedrock-gateway";
+type ProfileFormat =
+  | "anthropic"
+  | "openai"
+  | "openai-responses"
+  | "ollama"
+  | "bedrock-gateway"
+  | "claude-cli"
+  | "codex-cli";
 const OLLAMA_DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 const EFFORT_LEVELS: { value: string; label: string }[] = [
   { value: NONE, label: t("Not sent (default)") },
@@ -85,11 +94,11 @@ function cooldownText(secs: number) {
 }
 
 // The "healthy or not" badge a profile shows on its card. A profile without a Key cannot send any request at all — say that before the breaker;
-// the exception is Ollama, a keyless local server that IS callable without a key. The other states come from the pool's breaker
+// the exceptions are Ollama and local OAuth CLIs, which are callable without a key. The other states come from the pool's breaker
 // records (with polling off no new records appear, so "healthy" = no known failure).
 type Health = { label: string; cls: string; hint?: string };
 function healthOf(p: LLMProfile, m?: LLMPoolMember): Health {
-  if (!p.api_key_hint && p.format !== "ollama") {
+  if (!p.api_key_hint && p.format !== "ollama" && p.format !== "claude-cli" && p.format !== "codex-cli") {
     return {
       label: t("No Key configured"),
       cls: "border-muted-foreground/40 text-muted-foreground",
@@ -98,7 +107,8 @@ function healthOf(p: LLMProfile, m?: LLMPoolMember): Health {
   }
   if (m?.state === "tripped") {
     return {
-      label: m.cooldown_secs > 0 ? t("Tripped · {cooldown}", { cooldown: cooldownText(m.cooldown_secs) }) : t("Tripped"),
+      label:
+        m.cooldown_secs > 0 ? t("Tripped · {cooldown}", { cooldown: cooldownText(m.cooldown_secs) }) : t("Tripped"),
       cls: "border-destructive/50 text-destructive",
       hint: m.last_error,
     };
@@ -191,7 +201,9 @@ function PoolSheet({
           <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
             <div className="grid gap-0.5">
               <Label className="text-sm">{t("Enable pool")}</Label>
-              <p className="text-muted-foreground text-xs">{t("Off by default. When off, only the active profile is ever used and a failure stays a failure.")}</p>
+              <p className="text-muted-foreground text-xs">
+                {t("Off by default. When off, only the active profile is ever used and a failure stays a failure.")}
+              </p>
             </div>
             <Switch
               checked={enabled}
@@ -355,6 +367,8 @@ function ProfileSheet({
   const [sessionHeaderKey, setSessionHeaderKey] = React.useState(""); // custom session header name; empty = not sent
   const [userAgent, setUserAgent] = React.useState(""); // custom User-Agent; empty = keep the default UA
   const [customHeaders, setCustomHeaders] = React.useState("");
+  const [cliPath, setCliPath] = React.useState("");
+  const [cliConfigDir, setCliConfigDir] = React.useState("");
   const [clearCustomHeaders, setClearCustomHeaders] = React.useState(false);
   const [retry, setRetry] = React.useState<LLMRetryOverride>(ZERO_OVERRIDE); // retry override for this profile; all 0 = follow the global
   const [testing, setTesting] = React.useState(false);
@@ -370,7 +384,12 @@ function ProfileSheet({
     if (!open) return;
     setName(profile?.name ?? "");
     setFormat(
-      profile?.format === "openai" || profile?.format === "openai-responses" || profile?.format === "ollama" || profile?.format === "bedrock-gateway"
+      profile?.format === "openai" ||
+        profile?.format === "openai-responses" ||
+        profile?.format === "ollama" ||
+        profile?.format === "bedrock-gateway" ||
+        profile?.format === "claude-cli" ||
+        profile?.format === "codex-cli"
         ? profile.format
         : "anthropic",
     );
@@ -390,6 +409,8 @@ function ProfileSheet({
     setSessionHeaderKey(profile?.session_header_key ?? "");
     setUserAgent(profile?.user_agent ?? "");
     setCustomHeaders("");
+    setCliPath(profile?.cli_path ?? "");
+    setCliConfigDir(profile?.cli_config_dir ?? "");
     setClearCustomHeaders(false);
     setRetry(profile?.retry ?? ZERO_OVERRIDE);
     setApiKey("");
@@ -449,12 +470,17 @@ function ProfileSheet({
         sessionHeaderKey.trim(),
         userAgent.trim(),
         customHeaders,
+        cliPath.trim(),
+        cliConfigDir.trim(),
       );
       // Show the reply too: only when the model demonstrably spoke is this the same as working inside a session.
       if (r.ok)
-        toast.success(t("Connected · {latency}ms · {model}", { latency: r.latency_ms ?? "?", model: r.model ?? model }), {
-          description: r.reply ? t("Reply: {reply}", { reply: r.reply }) : undefined,
-        });
+        toast.success(
+          t("Connected · {latency}ms · {model}", { latency: r.latency_ms ?? "?", model: r.model ?? model }),
+          {
+            description: r.reply ? t("Reply: {reply}", { reply: r.reply }) : undefined,
+          },
+        );
       else toast.error(t("Connection failed: {error}", { error: r.error ?? t("unknown") }));
     } catch (e) {
       toast.error(t("Test error: {error}", { error: (e as Error).message }));
@@ -495,9 +521,12 @@ function ProfileSheet({
         user_agent: userAgent.trim(),
         custom_headers: format === "bedrock-gateway" ? customHeaders : "",
         clear_custom_headers: clearCustomHeaders,
+        cli_path: cliPath.trim(),
+        cli_config_dir: cliConfigDir.trim(),
         retry,
       });
-      if (isNew) toast.success(t('Created: {name} (use "Set as active" on its card to enable it)', { name: name.trim() }));
+      if (isNew)
+        toast.success(t('Created: {name} (use "Set as active" on its card to enable it)', { name: name.trim() }));
       else
         toast.success(
           profile?.is_default ? t("Saved; the active profile takes effect immediately, no restart needed") : t("Saved"),
@@ -511,6 +540,11 @@ function ProfileSheet({
     }
   }
 
+  const localCLI = format === "claude-cli" || format === "codex-cli";
+  let modelPlaceholder = "claude-opus-4-8";
+  if (format === "ollama") modelPlaceholder = "llama3.2";
+  if (format === "claude-cli") modelPlaceholder = "sonnet";
+  if (format === "codex-cli") modelPlaceholder = "gpt-5.3-codex";
   let keyPlaceholder = "sk-…";
   let keyLabel = "API Key";
   let basePlaceholder = "https://api.openai.com/v1";
@@ -571,6 +605,8 @@ function ProfileSheet({
                   <SelectItem value="openai-responses">OpenAI (Responses API)</SelectItem>
                   <SelectItem value="ollama">{t("Ollama (local, no key needed)")}</SelectItem>
                   <SelectItem value="bedrock-gateway">Bedrock gateway</SelectItem>
+                  <SelectItem value="claude-cli">Claude Code (local OAuth)</SelectItem>
+                  <SelectItem value="codex-cli">Codex CLI (local OAuth)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -582,7 +618,7 @@ function ProfileSheet({
               <Input
                 id="p-model"
                 className="font-mono"
-                placeholder={format === "ollama" ? "llama3.2" : "claude-opus-4-8"}
+                placeholder={modelPlaceholder}
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
               />
@@ -602,7 +638,7 @@ function ProfileSheet({
                     variant="outline"
                     size="icon"
                     className="shrink-0"
-                    disabled={loadingModels || format === "bedrock-gateway"}
+                    disabled={loadingModels || format === "bedrock-gateway" || localCLI}
                     onClick={loadModels}
                     title={t("Load available models from the API")}
                   >
@@ -650,22 +686,81 @@ function ProfileSheet({
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="p-base-url">{format === "bedrock-gateway" ? "Gateway base URL (required)" : t("Base URL (optional)")}</Label>
+            <Label htmlFor="p-base-url">
+              {format === "bedrock-gateway" ? "Gateway base URL (required)" : t("Base URL (optional)")}
+            </Label>
             <Input
               id="p-base-url"
               className="font-mono"
               placeholder={basePlaceholder}
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
+              disabled={localCLI}
             />
           </div>
+
+          {localCLI && (
+            <div className="grid gap-4 rounded-lg border p-3">
+              <div className="grid gap-2">
+                <Label htmlFor="p-cli-path">CLI executable</Label>
+                <Input
+                  id="p-cli-path"
+                  className="font-mono"
+                  placeholder={format === "claude-cli" ? "/usr/local/bin/claude" : "/usr/local/bin/codex"}
+                  value={cliPath}
+                  onChange={(e) => setCliPath(e.target.value)}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="p-cli-config-dir">OAuth profile directory</Label>
+                <Input
+                  id="p-cli-config-dir"
+                  className="font-mono"
+                  placeholder={
+                    format === "claude-cli" ? "/secure/artex/claude/account-a" : "/secure/artex/codex/account-a"
+                  }
+                  value={cliConfigDir}
+                  onChange={(e) => setCliConfigDir(e.target.value)}
+                />
+                <p className="text-muted-foreground text-xs">
+                  ARTEX stores only this directory path. OAuth access and refresh tokens remain owned by the CLI. Use
+                  one directory per account so task pinning and failover cannot mix identities.
+                </p>
+              </div>
+            </div>
+          )}
 
           {format === "bedrock-gateway" && (
             <div className="grid gap-2">
               <Label htmlFor="p-custom-headers">Custom gateway headers (optional)</Label>
-              <textarea id="p-custom-headers" className="min-h-20 w-full rounded-md border bg-background px-3 py-2 font-mono text-sm" placeholder="X-Example-Route: demo" value={customHeaders} onChange={(e) => { setCustomHeaders(e.target.value); setClearCustomHeaders(false); }} spellCheck={false} />
-              <p className="text-muted-foreground text-xs">One Name: Value per line. Values are encrypted and cannot be viewed after saving. Leave blank to keep saved headers.</p>
-              {profile?.custom_headers_set && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={clearCustomHeaders} onChange={(e) => { setClearCustomHeaders(e.target.checked); if (e.target.checked) setCustomHeaders(""); }} />Clear saved custom headers</label>}
+              <textarea
+                id="p-custom-headers"
+                className="min-h-20 w-full rounded-md border bg-background px-3 py-2 font-mono text-sm"
+                placeholder="X-Example-Route: demo"
+                value={customHeaders}
+                onChange={(e) => {
+                  setCustomHeaders(e.target.value);
+                  setClearCustomHeaders(false);
+                }}
+                spellCheck={false}
+              />
+              <p className="text-muted-foreground text-xs">
+                One Name: Value per line. Values are encrypted and cannot be viewed after saving. Leave blank to keep
+                saved headers.
+              </p>
+              {profile?.custom_headers_set && (
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={clearCustomHeaders}
+                    onChange={(e) => {
+                      setClearCustomHeaders(e.target.checked);
+                      if (e.target.checked) setCustomHeaders("");
+                    }}
+                  />
+                  Clear saved custom headers
+                </label>
+              )}
             </div>
           )}
 
@@ -677,6 +772,7 @@ function ProfileSheet({
               placeholder="socks5://user:pass@127.0.0.1:1080 · http://127.0.0.1:8080"
               value={proxy}
               onChange={(e) => setProxy(e.target.value)}
+              disabled={localCLI}
             />
             <p className="text-muted-foreground text-xs">
               {t(
@@ -693,6 +789,7 @@ function ProfileSheet({
               placeholder={t("e.g. x-session-id (empty = not sent)")}
               value={sessionHeaderKey}
               onChange={(e) => setSessionHeaderKey(e.target.value)}
+              disabled={localCLI}
             />
             <p className="text-muted-foreground text-xs">
               {rich(
@@ -711,6 +808,7 @@ function ProfileSheet({
               placeholder={t("e.g. my-app/1.0 (empty = default UA)")}
               value={userAgent}
               onChange={(e) => setUserAgent(e.target.value)}
+              disabled={localCLI}
             />
             <p className="text-muted-foreground text-xs">
               {rich(
@@ -721,25 +819,25 @@ function ProfileSheet({
             </p>
           </div>
 
-          <div className="grid gap-2">
-            <Label htmlFor="p-api-key">
-              {keyLabel}
-            </Label>
-            <Input
-              id="p-api-key"
-              type="password"
-              placeholder={keyPlaceholder}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              // A masked field with no autocomplete hint looks like this site's
-              // login password: password managers fill it and Save persists the
-              // wrong secret over the stored key. new-password keeps them out.
-              autoComplete="new-password"
-              spellCheck={false}
-              data-1p-ignore="true"
-              data-lpignore="true"
-            />
-          </div>
+          {!localCLI && (
+            <div className="grid gap-2">
+              <Label htmlFor="p-api-key">{keyLabel}</Label>
+              <Input
+                id="p-api-key"
+                type="password"
+                placeholder={keyPlaceholder}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                // A masked field with no autocomplete hint looks like this site's
+                // login password: password managers fill it and Save persists the
+                // wrong secret over the stored key. new-password keeps them out.
+                autoComplete="new-password"
+                spellCheck={false}
+                data-1p-ignore="true"
+                data-lpignore="true"
+              />
+            </div>
+          )}
 
           <div className="grid gap-4 sm:grid-cols-3">
             <div className="grid gap-2">
@@ -1072,9 +1170,7 @@ export default function LLMPage() {
 
                     <div className="flex flex-wrap gap-x-3 gap-y-0.5 pl-6 text-muted-foreground text-xs">
                       {p.api_key_hint && <span>{p.api_key_hint}</span>}
-                      <span>
-                        {t("{rps}/s · {rpm}/min", { rps: p.rate_per_second, rpm: p.rate_per_minute })}
-                      </span>
+                      <span>{t("{rps}/s · {rpm}/min", { rps: p.rate_per_second, rpm: p.rate_per_minute })}</span>
                       {p.proxy && <span className="truncate">{t("Proxy {proxy}", { proxy: p.proxy })}</span>}
                       {p.reasoning_effort && (
                         <span>

@@ -2724,5 +2724,20 @@
   "Search company…": "Şirket ara…",
   "Failed to load companies": "Şirketler yüklenemedi",
   "No company found": "Şirket bulunamadı",
-  "Manage companies": "Şirketleri yönet"
+  "Manage companies": "Şirketleri yönet",
+  "Reason for revealing this secret (recorded in audit log)": "Bu sırrı gösterme nedeni (denetim günlüğüne kaydedilir)",
+  "Discovered secrets": "Keşfedilen sırlar",
+  "TruffleHog results are encrypted at rest. Values stay 30% masked until an audited reveal action.": "TruffleHog sonuçları beklemede şifrelenir. Denetimli bir gösterme işlemine kadar değerlerin %30'u maskeli kalır.",
+  "No discovered secrets": "Keşfedilen sır yok",
+  "verified": "doğrulandı",
+  "unverified": "doğrulanmadı",
+  "unknown location": "bilinmeyen konum",
+  "Reveal or hide secret": "Sırrı göster veya gizle",
+  "Current execution": "Geçerli yürütme",
+  "Real agent, tool, result and timestamp from persisted task activity": "Kalıcı görev etkinliğinden gerçek ajan, araç, sonuç ve zaman damgası",
+  "system": "sistem",
+  "No result summary": "Sonuç özeti yok",
+  "No tool execution yet": "Henüz araç çalıştırılmadı",
+  "Blocked reason": "Engelleme nedeni",
+  "Progress": "İlerleme"
 }

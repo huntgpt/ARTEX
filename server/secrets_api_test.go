@@ -15,7 +15,7 @@ import (
 func TestSecretsNeverReturnedInClear(t *testing.T) {
 	s, _, request := trafficEvidenceServer(t)
 	pg := s.m.PG()
-	secrets := []string{"sk-llm-plain-0001", "mcp-env-plain-0002", "cred-plain-0003", "SECding-plain-0004", "tok-plain-0005"}
+	secrets := []string{"sk-llm-plain-0001", "mcp-env-plain-0002", "cred-plain-0003", "SECding-plain-0004", "tok-plain-0005", "P@ssw0rd"}
 	task, err := s.m.CreateTask("secrets api", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -24,6 +24,7 @@ func TestSecretsNeverReturnedInClear(t *testing.T) {
 	llmID, err := pg.SaveProfile(&db.LLMProfile{Name: "t-secapi", Format: "openai", Model: "m", APIKey: secrets[0]})
 	mcpID, err2 := pg.SaveMCP(&db.MCPServer{Name: "t-secapi", Transport: "http", Env: json.RawMessage(`{"X-API-Key":"` + secrets[1] + `","EMPTY":""}`)})
 	_, err3 := pg.UpsertTaskCredential(taskID, db.TaskCredentialInput{Domain: "x.example", Username: "u", Password: secrets[2]})
+	discovered, err5 := pg.UpsertDiscoveredSecret(taskID, db.DiscoveredSecretInput{Detector: "Test", SecretValue: secrets[5], Repository: "repo", FilePath: "prod.env"})
 	chID, err4 := pg.SaveNotificationChannel(context.Background(), &db.NotificationChannel{Name: "t-secapi", Kind: "dingtalk",
 		Config: json.RawMessage(`{"webhook":"https://oapi.example/send?access_token=` + secrets[4] + `","secret":"` + secrets[3] + `"}`)})
 	t.Cleanup(func() {
@@ -32,19 +33,34 @@ func TestSecretsNeverReturnedInClear(t *testing.T) {
 		pg.Exec(`DELETE FROM notification_channels WHERE id=$1`, chID)
 		pg.DeleteTask(taskID)
 	})
-	for _, e := range []error{err, err2, err3, err4} {
+	for _, e := range []error{err, err2, err3, err4, err5} {
 		if e != nil {
 			t.Fatal(e)
 		}
 	}
 
-	for _, path := range []string{"/api/llm/profiles", "/api/llm", "/api/mcp", "/api/notify/channels", "/api/tasks/" + task.ID + "/credentials"} {
+	for _, path := range []string{"/api/llm/profiles", "/api/llm", "/api/mcp", "/api/notify/channels", "/api/tasks/" + task.ID + "/credentials", "/api/tasks/" + task.ID + "/secrets"} {
 		resp := request("GET", path, "")
 		for _, sec := range secrets {
 			if resp.Code != 200 || strings.Contains(resp.Body.String(), sec) {
 				t.Fatalf("GET %s: HTTP %d or a secret returned in clear", path, resp.Code)
 			}
 		}
+	}
+	listResp := request("GET", "/api/tasks/"+task.ID+"/secrets", "")
+	if !strings.Contains(listResp.Body.String(), `"masked_value":"P@ssw***"`) {
+		t.Fatalf("discovered secret list did not use the 30%% mask: %s", listResp.Body.String())
+	}
+	if resp := request("POST", "/api/tasks/"+task.ID+"/secrets/"+strconv.FormatInt(discovered.ID, 10)+"/reveal", `{}`); resp.Code != 400 {
+		t.Fatalf("reveal without a reason must fail, got HTTP %d", resp.Code)
+	}
+	reveal := request("POST", "/api/tasks/"+task.ID+"/secrets/"+strconv.FormatInt(discovered.ID, 10)+"/reveal", `{"action":"validation-use","reason":"authorized test"}`)
+	if reveal.Code != 200 || !strings.Contains(reveal.Body.String(), secrets[5]) {
+		t.Fatalf("audited reveal failed: HTTP %d %s", reveal.Code, reveal.Body.String())
+	}
+	var auditCount int
+	if err := pg.QueryRow(`SELECT count(*) FROM secret_access_audit WHERE secret_id=$1 AND action='validation-use' AND reason='authorized test'`, discovered.ID).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("reveal audit count=%d err=%v", auditCount, err)
 	}
 
 	// MCP: echo the masked list entry back with a name change; the key survives.

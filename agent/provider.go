@@ -37,6 +37,11 @@ type Config struct {
 	BaseURL string
 	APIKey  string
 	Model   string
+	// CLIPath and CLIConfigDir apply only to local Claude Code/Codex CLI
+	// profiles. The directory is an isolated OAuth profile owned by the CLI;
+	// ARTEX stores no OAuth access or refresh token.
+	CLIPath      string
+	CLIConfigDir string
 	// Proxy routes all LLM requests through the given proxy URL (http/https/socks5,
 	// optionally with user:pass@ credentials). Empty means direct — it does NOT
 	// fall back to the standard *_PROXY environment variables.
@@ -144,6 +149,8 @@ const (
 // OpenAI's public endpoint).
 const FormatOllama llm.Format = "ollama"
 const FormatBedrockGateway llm.Format = "bedrock-gateway"
+const FormatClaudeCLI llm.Format = "claude-cli"
+const FormatCodexCLI llm.Format = "codex-cli"
 
 // DefaultOllamaBaseURL is the base of Ollama's OpenAI-compatible endpoint the
 // provider appends /chat/completions to. Must never end up empty: with an
@@ -175,7 +182,14 @@ func normalizeOllamaBaseURL(raw string) string {
 
 // NeedsAPIKey reports whether this provider format requires an API key to be
 // usable. Ollama (local server) is keyless; every cloud format needs one.
-func (c Config) NeedsAPIKey() bool { return c.Format != FormatOllama }
+func (c Config) NeedsAPIKey() bool {
+	switch c.Format {
+	case FormatOllama, FormatClaudeCLI, FormatCodexCLI:
+		return false
+	default:
+		return true
+	}
+}
 
 // CompactionWindow returns the model context window in TOKENS for compaction
 // thresholds, resolved from the user-configured size (ContextWindowK). 0/unset →
@@ -283,6 +297,20 @@ func FromEnv() (Config, bool) {
 		if c.BaseURL == "" || c.Model == "" {
 			return Config{}, false
 		}
+	case "claude-cli":
+		c.Format = FormatClaudeCLI
+		c.CLIPath = strings.TrimSpace(os.Getenv("ARTEX_LLM_CLI_PATH"))
+		c.CLIConfigDir = strings.TrimSpace(os.Getenv("ARTEX_LLM_CLI_CONFIG_DIR"))
+		if c.Model == "" {
+			c.Model = "sonnet"
+		}
+	case "codex-cli":
+		c.Format = FormatCodexCLI
+		c.CLIPath = strings.TrimSpace(os.Getenv("ARTEX_LLM_CLI_PATH"))
+		c.CLIConfigDir = strings.TrimSpace(os.Getenv("ARTEX_LLM_CLI_CONFIG_DIR"))
+		if c.Model == "" {
+			c.Model = "gpt-5.3-codex"
+		}
 	default:
 		c.Format = llm.FormatAnthropic
 		c.APIKey = anthKey
@@ -338,6 +366,20 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		c.Format = FormatBedrockGateway
 		// No public-provider defaults: an absent URL, model or token fails closed.
 		c.BaseURL = strings.TrimRight(strings.TrimSuffix(strings.TrimSuffix(c.BaseURL, "/invoke-with-response-stream"), "/invoke"), "/")
+	case "claude-cli":
+		c.Format = FormatClaudeCLI
+		c.BaseURL = ""
+		c.APIKey = ""
+		if c.Model == "" {
+			c.Model = "sonnet"
+		}
+	case "codex-cli":
+		c.Format = FormatCodexCLI
+		c.BaseURL = ""
+		c.APIKey = ""
+		if c.Model == "" {
+			c.Model = "gpt-5.3-codex"
+		}
 	default:
 		c.Format = llm.FormatAnthropic
 		// provider appends "/v1/messages".
@@ -371,6 +413,10 @@ func (c Config) Provider() string {
 		return "ollama"
 	case FormatBedrockGateway:
 		return "bedrock-gateway"
+	case FormatClaudeCLI:
+		return "claude-cli"
+	case FormatCodexCLI:
+		return "codex-cli"
 	}
 	return "anthropic"
 }
@@ -379,6 +425,9 @@ func (c Config) Provider() string {
 // limiter lives on the single provider instance — so planner + all workers +
 // main agent (which share this provider) are bounded by one shared rate limit.
 func (c Config) NewProvider() (llm.Provider, error) {
+	if c.Format == FormatClaudeCLI || c.Format == FormatCodexCLI {
+		return newCLIProvider(c)
+	}
 	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey, c.UserAgent)
 	if err != nil {
 		return nil, err

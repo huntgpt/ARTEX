@@ -17,8 +17,6 @@ import type {
   Asset,
   AssetInterceptRule,
   AssetInterceptRuleInput,
-  TaskCredential,
-  TaskCredentialInput,
   Audit,
   BatchCategoryItem,
   BatchControlItem,
@@ -34,6 +32,7 @@ import type {
   DailyTokenBucket,
   DeleteTaskOptions,
   DeleteTaskResult,
+  DiscoveredSecret,
   Edge,
   EvidenceBodyPreview,
   ExplorationNodePage,
@@ -43,8 +42,8 @@ import type {
   FindingDeepenResponse,
   FindingGroupsPage,
   FindingQuery,
-  FindingRetest,
   FindingReportState,
+  FindingRetest,
   FindingStats,
   FindingStatus,
   FindingsPage,
@@ -75,6 +74,7 @@ import type {
   NotificationMeta,
   PromptVar,
   PromptVersion,
+  RevealedSecret,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -96,6 +96,8 @@ import type {
   TaskAssetScopeMutation,
   TaskCategory,
   TaskConstraint,
+  TaskCredential,
+  TaskCredentialInput,
   TaskGoal,
   TaskLLMResolutions,
   TaskNode,
@@ -339,6 +341,12 @@ export const api = {
   addTaskCredential: (id: string, input: TaskCredentialInput) =>
     post<TaskCredential>(`/tasks/${id}/credentials`, input),
   deleteTaskCredential: (id: string, cid: number) => del(`/tasks/${id}/credentials/${cid}`),
+  taskDiscoveredSecrets: (id: string) => get<DiscoveredSecret[]>(`/tasks/${id}/secrets`).then((r) => arr(r)),
+  revealTaskDiscoveredSecret: (id: string, secretId: number, reason: string) =>
+    post<RevealedSecret>(`/tasks/${id}/secrets/${secretId}/reveal`, {
+      action: "reveal",
+      reason,
+    }),
   renameTaskCategory: (id: number, name: string) => patch<TaskCategory>(`/task-categories/${id}`, { name }),
   deleteTaskCategory: (id: number) => del<{ deleted: number }>(`/task-categories/${id}`),
   updateTaskCategory: (taskId: string, categoryId?: number) =>
@@ -752,7 +760,13 @@ export const api = {
   // Save a vulnerability's name/class/severity in one call (inline edit in the findings list); only present fields are sent.
   updateFinding: (
     id: string,
-    fields: { name?: string; vulnclass?: string; severity?: Severity; status?: FindingStatus; report_state?: FindingReportState },
+    fields: {
+      name?: string;
+      vulnclass?: string;
+      severity?: Severity;
+      status?: FindingStatus;
+      report_state?: FindingReportState;
+    },
   ) => patch<Finding>(`/exploration/findings/${id}`, fields),
   // Delete a vulnerability: removes the findings record + the source exploration node (gone from the findings list, the task findings tab, and the exploration graph together).
   deleteFinding: (id: string) => del<{ deleted: boolean; id: number }>(`/exploration/findings/${id}`),
@@ -803,12 +817,13 @@ export const api = {
       assets: r.assets ?? {},
     }));
   },
-  activity: (task?: string, opts?: { intent?: string; since?: number; limit?: number }) => {
+  activity: (task?: string, opts?: { intent?: string; since?: number; limit?: number; latest?: boolean }) => {
     const q = new URLSearchParams();
     if (task) q.set("task", task);
     if (opts?.intent) q.set("intent", opts.intent);
     if (opts?.since) q.set("since", String(opts.since));
     if (opts?.limit) q.set("limit", String(opts.limit));
+    if (opts?.latest) q.set("latest", "true");
     return get<{ items: Activity[]; cursor: number }>(`/exploration/activity?${q.toString()}`).then((r) => ({
       items: arr(r.items),
       cursor: r.cursor ?? 0,
@@ -1023,8 +1038,7 @@ export const api = {
   // Channels are multi-instance resources (several bots of the same kind, each with its own
   // filter rules), so they form their own group instead of the flat settings key/value store.
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;
@@ -1145,6 +1159,8 @@ export const api = {
     session_header_key = "", // non-empty = the test request also carries this custom session header (value is a one-off session id)
     user_agent = "", // non-empty = the test overrides the User-Agent header with this value
     custom_headers = "",
+    cli_path = "",
+    cli_config_dir = "",
   ) =>
     // reply = the model's actual reply (truncated); the backend marks a profile that replies with nothing as failed
     post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>("/llm/test", {
@@ -1160,6 +1176,8 @@ export const api = {
       session_header_key,
       user_agent,
       custom_headers,
+      cli_path,
+      cli_config_dir,
     }),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
   saveLLMProfile: (p: {
@@ -1184,6 +1202,8 @@ export const api = {
     user_agent?: string; // non-empty = override the User-Agent header on every request; "" = keep the default UA
     custom_headers?: string; // static Bedrock gateway headers; values are write-only
     clear_custom_headers?: boolean;
+    cli_path?: string;
+    cli_config_dir?: string;
     retry?: LLMRetryOverride; // this profile's retry override; all zeros = follow the global retry policy
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
@@ -1222,6 +1242,19 @@ export const api = {
   pinConversation: (id: number, pinned: boolean) => patch<Conversation>(`/conversations/${id}`, { pinned }),
   updateConversationProfile: (id: number, llm_profile_id: number | null) =>
     patch<{ ok: boolean }>(`/conversations/${id}/profile`, { llm_profile_id }),
+
+  // ---- Active Directory collection and graph ----
+  taskADGraph: (taskId: string) => get<import("./types").ADGraph>(`/tasks/${taskId}/ad/graph`),
+  taskADRuns: (taskId: string) =>
+    get<{ runs: import("./types").ADCollectionRun[] }>(`/tasks/${taskId}/ad/runs`).then((r) => arr(r.runs)),
+  createTaskADRun: (taskId: string, collector: string, mode: string, requested_by = "operator") =>
+    post<import("./types").ADCollectionRun>(`/tasks/${taskId}/ad/runs`, { collector, mode, requested_by }),
+  transitionTaskADRun: (taskId: string, runId: number, state: string, reason = "", actor = "operator") =>
+    post<import("./types").ADCollectionRun>(`/tasks/${taskId}/ad/runs/${runId}/transition`, {
+      state,
+      reason,
+      actor,
+    }),
   deleteConversation: (id: number) => del<{ deleted: number }>(`/conversations/${id}`),
   deleteConversations: (ids: number[]) =>
     post<{ items: { id: number; ok: boolean; error?: string }[] }>("/conversations/delete/batch", { ids }),
@@ -1306,8 +1339,12 @@ export const api = {
     t: Pick<Tool, "description" | "schema" | "agents" | "enabled" | "kind" | "exec" | "deferred">,
   ) => put<{ ok: boolean }>(`/tools/custom/${key}`, t),
   deleteCustomTool: (key: string) => del<{ deleted: string }>(`/tools/custom/${key}`),
-  testCustomTool: (body: { key?: string; kind: string; exec: Record<string, unknown>; params: Record<string, unknown> }) =>
-    post<{ output: string; is_error: boolean }>("/tools/custom/test", body),
+  testCustomTool: (body: {
+    key?: string;
+    kind: string;
+    exec: Record<string, unknown>;
+    params: Record<string, unknown>;
+  }) => post<{ output: string; is_error: boolean }>("/tools/custom/test", body),
   detectPython: () => post<{ python_interpreter: string }>("/settings/python/detect", {}),
 
   // ---- mcp ----

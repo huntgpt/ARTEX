@@ -77,13 +77,15 @@ func (c secretColumn) valueExpr() string {
 }
 
 var (
-	colLLMKey      = secretColumn{"llm_profiles", "api_key", false, ""}
-	colLLMProxy    = secretColumn{"llm_profiles", "proxy", false, ""} // may carry user:pass
-	colLLMHeaders  = secretColumn{"llm_profiles", "custom_headers", false, ""}
-	colMCPEnv      = secretColumn{"mcp_servers", "env", true, ""}
-	colCredPass    = secretColumn{"task_credentials", "password", false, ""}
-	colNotifConfig = secretColumn{"notification_channels", "config", true, ""}
-	colToolExec    = secretColumn{"tools", "exec", true, ""} // system=false rows: headers, proxy, body, code, command
+	colLLMKey             = secretColumn{"llm_profiles", "api_key", false, ""}
+	colLLMProxy           = secretColumn{"llm_profiles", "proxy", false, ""} // may carry user:pass
+	colLLMHeaders         = secretColumn{"llm_profiles", "custom_headers", false, ""}
+	colMCPEnv             = secretColumn{"mcp_servers", "env", true, ""}
+	colCredPass           = secretColumn{"task_credentials", "password", false, ""}
+	colDiscoveredSecret   = secretColumn{"discovered_secrets", "secret_value", false, ""}
+	colDiscoveredSecretV2 = secretColumn{"discovered_secrets", "secret_value_v2", false, ""}
+	colNotifConfig        = secretColumn{"notification_channels", "config", true, ""}
+	colToolExec           = secretColumn{"tools", "exec", true, ""} // system=false rows: headers, proxy, body, code, command
 	// Evidence head blocks carry the captured Cookie and Authorization headers.
 	colEvReqHead  = secretColumn{"traffic_evidence_snapshots", "req_head", false, ""}
 	colEvRespHead = secretColumn{"traffic_evidence_snapshots", "resp_head", false, ""}
@@ -96,7 +98,7 @@ var (
 	colHookSource      = secretColumn{"traffic_tamper_hooks", "source", false, ""}
 	colHookVerMatchers = secretColumn{"traffic_tamper_hook_versions", "matchers", true, ""}
 	colHookVerSource   = secretColumn{"traffic_tamper_hook_versions", "source", false, ""}
-	secretColumns      = append([]secretColumn{colLLMKey, colLLMProxy, colLLMHeaders, colMCPEnv, colCredPass, colNotifConfig, colToolExec, colEvReqHead, colEvRespHead, colRewriteMatchers, colRewriteActions, colHookMatchers, colHookSource, colHookVerMatchers, colHookVerSource}, secretSettingColumns()...)
+	secretColumns      = append([]secretColumn{colLLMKey, colLLMProxy, colLLMHeaders, colMCPEnv, colCredPass, colDiscoveredSecret, colDiscoveredSecretV2, colNotifConfig, colToolExec, colEvReqHead, colEvRespHead, colRewriteMatchers, colRewriteActions, colHookMatchers, colHookSource, colHookVerMatchers, colHookVerSource}, secretSettingColumns()...)
 )
 
 // secretSettingKeys are the settings stored encrypted, AAD "settings.<key>".

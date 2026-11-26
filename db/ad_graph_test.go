@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/Autumn-27/artex/ad"
@@ -82,5 +83,56 @@ func TestADObservationIsIdempotent(t *testing.T) {
 	}
 	if len(graph.Entities) != 1 || graph.Entities[0].DNSHostname != "dc01.corp.example.com" {
 		t.Fatalf("unexpected graph: %+v", graph)
+	}
+}
+
+func TestADCollectionRunLifecycleAndArtifacts(t *testing.T) {
+	database, err := Open(testDSN(t))
+	if err != nil {
+		SkipPGUnavailable(t, err)
+	}
+	defer database.Close()
+	explorationID, err := database.CreateExploration("AD lifecycle test", "audited collection")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = database.Exec(`DELETE FROM explorations WHERE id=$1`, explorationID) })
+	store := database.Exploration(explorationID)
+	ctx := context.Background()
+	run, err := store.CreateADCollectionRun(ctx, "sharphound", "on-host", "operator@example")
+	if err != nil || run.State != ad.RunQueued {
+		t.Fatalf("create run=%+v err=%v", run, err)
+	}
+	if _, err = store.TransitionADCollectionRun(ctx, run.ID, ad.RunApproved, "approver@example", "authorized"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.TransitionADCollectionRun(ctx, run.ID, ad.RunRunning, "agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.TransitionADCollectionRun(ctx, run.ID, ad.RunIngesting, "agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	artifact := ADCollectionArtifact{
+		Kind: "bloodhound-json", LogicalPath: "artifacts/users.json",
+		SHA256:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ByteSize: 1234, State: "ingested",
+	}
+	if err := store.AddADCollectionArtifact(ctx, run.ID, artifact); err != nil {
+		t.Fatal(err)
+	}
+	result := ADIngestResult{Records: 2, EntitiesUpserted: 2, EdgesUpserted: 1}
+	if err := store.FinishADCollectionRun(ctx, run.ID, ad.RunComplete, result, ""); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := database.ListADCollectionRuns(ctx, explorationID)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs=%+v err=%v", runs, err)
+	}
+	got := runs[0]
+	if got.State != ad.RunComplete || got.Entities != 2 || got.Edges != 1 || len(got.Artifacts) != 1 || got.ApprovedBy != "approver@example" {
+		t.Fatalf("completed run=%+v", got)
+	}
+	if _, err := store.TransitionADCollectionRun(ctx, run.ID, ad.RunRunning, "agent", ""); !errors.Is(err, ErrADRunStateConflict) {
+		t.Fatalf("terminal transition error=%v", err)
 	}
 }
