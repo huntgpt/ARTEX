@@ -40,8 +40,12 @@ type Config struct {
 	// CLIPath and CLIConfigDir apply only to local Claude Code/Codex CLI
 	// profiles. The directory is an isolated OAuth profile owned by the CLI;
 	// ARTEX stores no OAuth access or refresh token.
-	CLIPath      string
-	CLIConfigDir string
+	CLIPath          string
+	CLIConfigDir     string
+	CLIAuthTokenFile string
+	// CyberAccessProgram is an explicit Codex CLI cyber policy tier. Empty leaves
+	// the account default unchanged; supported values mirror `codex exec`.
+	CyberAccessProgram string
 	// Proxy routes all LLM requests through the given proxy URL (http/https/socks5,
 	// optionally with user:pass@ credentials). Empty means direct — it does NOT
 	// fall back to the standard *_PROXY environment variables.
@@ -308,6 +312,7 @@ func FromEnv() (Config, bool) {
 		c.Format = FormatCodexCLI
 		c.CLIPath = strings.TrimSpace(os.Getenv("ARTEX_LLM_CLI_PATH"))
 		c.CLIConfigDir = strings.TrimSpace(os.Getenv("ARTEX_LLM_CLI_CONFIG_DIR"))
+		c.CyberAccessProgram = strings.TrimSpace(os.Getenv("ARTEX_LLM_CYBER_ACCESS_PROGRAM"))
 		if c.Model == "" {
 			c.Model = "gpt-5.3-codex"
 		}

@@ -25,10 +25,12 @@ const (
 // control plane: its transcript and tool schemas are sent as inert JSON and the
 // CLI may return only text or an ARTEX tool call in the bridge response.
 type cliProvider struct {
-	kind       llm.Format
-	executable string
-	configDir  string
-	model      string
+	kind          llm.Format
+	executable    string
+	configDir     string
+	model         string
+	cyberTier     string
+	authTokenFile string
 }
 
 type cliBridgeResponse struct {
@@ -65,7 +67,30 @@ func newCLIProvider(c Config) (llm.Provider, error) {
 	if strings.TrimSpace(c.Model) == "" {
 		return nil, errors.New("local CLI model is required")
 	}
-	return &cliProvider{kind: c.Format, executable: exe, configDir: dir, model: strings.TrimSpace(c.Model)}, nil
+	cyberTier := strings.TrimSpace(c.CyberAccessProgram)
+	authTokenFile := strings.TrimSpace(c.CLIAuthTokenFile)
+	if c.Format != FormatCodexCLI && cyberTier != "" {
+		return nil, errors.New("cyber access program is supported only by Codex CLI")
+	}
+	if cyberTier != "" && cyberTier != "standard" && cyberTier != "daybreak_blue" && cyberTier != "daybreak_red" {
+		return nil, fmt.Errorf("unsupported Codex cyber access program %q", cyberTier)
+	}
+	if c.Format != FormatClaudeCLI && authTokenFile != "" {
+		return nil, errors.New("OAuth token file is supported only by Claude CLI")
+	}
+	if authTokenFile != "" {
+		if !filepath.IsAbs(authTokenFile) {
+			return nil, errors.New("Claude OAuth token file must be an absolute path")
+		}
+		info, err := os.Stat(authTokenFile)
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("Claude OAuth token file is not a regular file: %s", authTokenFile)
+		}
+		if info.Mode().Perm()&0077 != 0 {
+			return nil, errors.New("Claude OAuth token file must not be accessible by group or other users")
+		}
+	}
+	return &cliProvider{kind: c.Format, executable: exe, configDir: dir, model: strings.TrimSpace(c.Model), cyberTier: cyberTier, authTokenFile: authTokenFile}, nil
 }
 
 // validateCLIProfile resolves an optional executable name and requires an
@@ -179,7 +204,7 @@ ARTEX_REQUEST_JSON:
 
 func (p *cliProvider) runClaude(ctx context.Context, prompt string) (cliBridgeResponse, llm.Usage, error) {
 	args := []string{"--print", "--output-format", "json", "--model", p.model, "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--permission-mode", "manual"}
-	out, stderr, err := runCLICommand(ctx, p.executable, args, prompt, p.configDir, FormatClaudeCLI)
+	out, stderr, err := runCLICommand(ctx, p.executable, args, prompt, p.configDir, FormatClaudeCLI, p.authTokenFile)
 	if err != nil {
 		return cliBridgeResponse{}, llm.Usage{}, fmt.Errorf("Claude Code failed: %w: %s", err, clippedCLIError(stderr, out))
 	}
@@ -206,8 +231,8 @@ func (p *cliProvider) runCodex(ctx context.Context, prompt string) (cliBridgeRes
 	if err := os.WriteFile(schemaPath, []byte(cliBridgeSchema), 0600); err != nil {
 		return cliBridgeResponse{}, llm.Usage{}, err
 	}
-	args := []string{"exec", "--json", "--model", p.model, "--sandbox", "read-only", "--ask-for-approval", "never", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--output-schema", schemaPath, "--output-last-message", answerPath, "-C", runDir, "-"}
-	out, stderr, err := runCLICommand(ctx, p.executable, args, prompt, p.configDir, FormatCodexCLI)
+	args := codexCLIArgs(p.model, p.cyberTier, runDir, schemaPath, answerPath)
+	out, stderr, err := runCLICommand(ctx, p.executable, args, prompt, p.configDir, FormatCodexCLI, "")
 	usage := extractCLIUsage(out)
 	if err != nil {
 		return cliBridgeResponse{}, usage, fmt.Errorf("Codex CLI failed: %w: %s", err, clippedCLIError(stderr, out))
@@ -220,10 +245,34 @@ func (p *cliProvider) runCodex(ctx context.Context, prompt string) (cliBridgeRes
 	return response, usage, err
 }
 
-func runCLICommand(ctx context.Context, executable string, args []string, stdin, configDir string, kind llm.Format) ([]byte, []byte, error) {
+// codexCLIArgs intentionally relies on exec's non-interactive behavior instead
+// of the removed --ask-for-approval flag. The bridge runs in an empty temporary
+// directory, read-only, ephemeral, without user rules or MCP configuration.
+// Keeping this in one function makes CLI compatibility and the safety envelope
+// straightforward to pin in a regression test.
+func codexCLIArgs(model, cyberTier, runDir, schemaPath, answerPath string) []string {
+	args := []string{"exec", "--json", "--model", model, "--sandbox", "read-only", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"}
+	if cyberTier != "" {
+		args = append(args, "--cyber-access-program", cyberTier)
+	}
+	return append(args, "--output-schema", schemaPath, "--output-last-message", answerPath, "-C", runDir, "-")
+}
+
+func runCLICommand(ctx context.Context, executable string, args []string, stdin, configDir string, kind llm.Format, authTokenFile string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = localCLIEnvironment(kind, configDir)
+	var tokenFile *os.File
+	if kind == FormatClaudeCLI && authTokenFile != "" {
+		var err error
+		tokenFile, err = os.Open(authTokenFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open Claude OAuth token file: %w", err)
+		}
+		defer tokenFile.Close()
+		cmd.ExtraFiles = []*os.File{tokenFile}
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3")
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedBuffer{buffer: &stdout, remaining: maxCLIBridgeOutput}
 	cmd.Stderr = &limitedBuffer{buffer: &stderr, remaining: maxCLIBridgeOutput}

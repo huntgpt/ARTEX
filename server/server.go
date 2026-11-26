@@ -426,7 +426,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 		return agent.Config{}, false
 	}
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
-	cfg.CLIPath, cfg.CLIConfigDir = p.CLIPath, p.CLIConfigDir
+	cfg.CLIPath, cfg.CLIConfigDir, cfg.CLIAuthTokenFile, cfg.CyberAccessProgram = p.CLIPath, p.CLIConfigDir, p.CLIAuthTokenFile, p.CyberAccessProgram
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
@@ -613,7 +613,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 		return agent.Config{}, false
 	}
 	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey, p.Proxy)
-	cfg.CLIPath, cfg.CLIConfigDir = p.CLIPath, p.CLIConfigDir
+	cfg.CLIPath, cfg.CLIConfigDir, cfg.CLIAuthTokenFile, cfg.CyberAccessProgram = p.CLIPath, p.CLIConfigDir, p.CLIAuthTokenFile, p.CyberAccessProgram
 	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
 	cfg.ContextWindowK = p.ContextWindowK
 	cfg.ThinkingType = p.ThinkingType
@@ -1582,20 +1582,22 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 // testLLM makes a real minimal completion to verify the config works.
 func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider         string `json:"provider"`
-		Model            string `json:"model"`
-		BaseURL          string `json:"base_url"`
-		Proxy            string `json:"proxy"`
-		APIKey           string `json:"api_key"`
-		ThinkingType     string `json:"thinking_type"`
-		ReasoningEffort  string `json:"reasoning_effort"`
-		ProfileID        *int64 `json:"profile_id"`         // passed when testing a stored profile: if api_key is empty, its stored key is used
-		Streaming        *bool  `json:"streaming"`          // omitted = streaming, the same defaults as when saving a profile
-		SessionHeaderKey string `json:"session_header_key"` // non-empty = the test also sends this custom session header, with a one-off random session id as the value
-		UserAgent        string `json:"user_agent"`         // non-empty = the test overrides the User-Agent header with this value (mirrors production)
-		CustomHeaders    string `json:"custom_headers"`
-		CLIPath          string `json:"cli_path"`
-		CLIConfigDir     string `json:"cli_config_dir"`
+		Provider           string `json:"provider"`
+		Model              string `json:"model"`
+		BaseURL            string `json:"base_url"`
+		Proxy              string `json:"proxy"`
+		APIKey             string `json:"api_key"`
+		ThinkingType       string `json:"thinking_type"`
+		ReasoningEffort    string `json:"reasoning_effort"`
+		ProfileID          *int64 `json:"profile_id"`         // passed when testing a stored profile: if api_key is empty, its stored key is used
+		Streaming          *bool  `json:"streaming"`          // omitted = streaming, the same defaults as when saving a profile
+		SessionHeaderKey   string `json:"session_header_key"` // non-empty = the test also sends this custom session header, with a one-off random session id as the value
+		UserAgent          string `json:"user_agent"`         // non-empty = the test overrides the User-Agent header with this value (mirrors production)
+		CustomHeaders      string `json:"custom_headers"`
+		CLIPath            string `json:"cli_path"`
+		CLIConfigDir       string `json:"cli_config_dir"`
+		CLIAuthTokenFile   string `json:"cli_auth_token_file"`
+		CyberAccessProgram string `json:"cyber_access_program"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1649,9 +1651,15 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.CLIConfigDir) == "" {
 			req.CLIConfigDir = stored.CLIConfigDir
 		}
+		if strings.TrimSpace(req.CyberAccessProgram) == "" {
+			req.CyberAccessProgram = stored.CyberAccessProgram
+		}
+		if strings.TrimSpace(req.CLIAuthTokenFile) == "" {
+			req.CLIAuthTokenFile = stored.CLIAuthTokenFile
+		}
 	}
 	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
-	cfg.CLIPath, cfg.CLIConfigDir = req.CLIPath, req.CLIConfigDir
+	cfg.CLIPath, cfg.CLIConfigDir, cfg.CLIAuthTokenFile, cfg.CyberAccessProgram = req.CLIPath, req.CLIConfigDir, req.CLIAuthTokenFile, req.CyberAccessProgram
 	// mirror production: send the SAME thinking params so a provider that rejects the
 	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
 	cfg.ThinkingType = req.ThinkingType

@@ -1246,6 +1246,8 @@ export interface LLMProfile {
   api_key_hint?: string;
   cli_path?: string;
   cli_config_dir?: string;
+  cli_auth_token_file?: string;
+  cyber_access_program?: "" | "standard" | "daybreak_blue" | "daybreak_red";
   rate_per_second: number;
   rate_per_minute: number;
   context_window_k?: number;

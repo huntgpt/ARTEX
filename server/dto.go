@@ -618,22 +618,24 @@ func agentDTOs(in []*db.Agent) []AgentDTO {
 // ---- LLMProfile (frontend "LLMProfile") — string id ----
 
 type LLMProfileDTO struct {
-	ID              string  `json:"id"`
-	Name            string  `json:"name"`
-	Format          string  `json:"format"`
-	BaseURL         string  `json:"base_url,omitempty"`
-	Proxy           string  `json:"proxy,omitempty"` // masked: the placeholder when set
-	ProxySet        bool    `json:"proxy_set"`
-	Model           string  `json:"model"`
-	APIKeyHint      string  `json:"api_key_hint,omitempty"`
-	CLIPath         string  `json:"cli_path,omitempty"`
-	CLIConfigDir    string  `json:"cli_config_dir,omitempty"`
-	RatePerSecond   float64 `json:"rate_per_second"`
-	RatePerMinute   float64 `json:"rate_per_minute"`
-	ContextWindowK  int     `json:"context_window_k"`
-	ThinkingType    string  `json:"thinking_type"`
-	ReasoningEffort string  `json:"reasoning_effort"`
-	IsDefault       bool    `json:"is_default"`
+	ID                 string  `json:"id"`
+	Name               string  `json:"name"`
+	Format             string  `json:"format"`
+	BaseURL            string  `json:"base_url,omitempty"`
+	Proxy              string  `json:"proxy,omitempty"` // masked: the placeholder when set
+	ProxySet           bool    `json:"proxy_set"`
+	Model              string  `json:"model"`
+	APIKeyHint         string  `json:"api_key_hint,omitempty"`
+	CLIPath            string  `json:"cli_path,omitempty"`
+	CLIConfigDir       string  `json:"cli_config_dir,omitempty"`
+	CLIAuthTokenFile   string  `json:"cli_auth_token_file,omitempty"`
+	CyberAccessProgram string  `json:"cyber_access_program,omitempty"`
+	RatePerSecond      float64 `json:"rate_per_second"`
+	RatePerMinute      float64 `json:"rate_per_minute"`
+	ContextWindowK     int     `json:"context_window_k"`
+	ThinkingType       string  `json:"thinking_type"`
+	ReasoningEffort    string  `json:"reasoning_effort"`
+	IsDefault          bool    `json:"is_default"`
 	// Pooling (failover) parameters: higher priority is picked first (the active
 	// profile is always the chain head); pool_exclude=true excludes it as a failover target, though agents/tasks can still bind it explicitly.
 	Priority    int  `json:"priority"`
@@ -660,31 +662,33 @@ type LLMProfileDTO struct {
 
 func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 	return LLMProfileDTO{
-		ID:               i64s(p.ID),
-		Name:             p.Name,
-		Format:           p.Format,
-		BaseURL:          p.BaseURL,
-		Proxy:            maskedSecret(p.Proxy),
-		ProxySet:         p.Proxy != "",
-		Model:            p.Model,
-		APIKeyHint:       p.APIKeyHint,
-		CLIPath:          p.CLIPath,
-		CLIConfigDir:     p.CLIConfigDir,
-		RatePerSecond:    p.RatePerSecond,
-		RatePerMinute:    p.RatePerMinute,
-		ContextWindowK:   p.ContextWindowK,
-		ThinkingType:     p.ThinkingType,
-		ReasoningEffort:  p.ReasoningEffort,
-		IsDefault:        p.IsDefault,
-		Priority:         p.Priority,
-		PoolExclude:      p.PoolExclude,
-		Streaming:        p.Streaming,
-		MaxTokens:        p.MaxTokens,
-		MaxTokensField:   p.MaxTokensField,
-		SessionHeaderKey: p.SessionHeaderKey,
-		UserAgent:        p.UserAgent,
-		CustomHeadersSet: p.CustomHeaders != "",
-		Retry:            p.Retry,
+		ID:                 i64s(p.ID),
+		Name:               p.Name,
+		Format:             p.Format,
+		BaseURL:            p.BaseURL,
+		Proxy:              maskedSecret(p.Proxy),
+		ProxySet:           p.Proxy != "",
+		Model:              p.Model,
+		APIKeyHint:         p.APIKeyHint,
+		CLIPath:            p.CLIPath,
+		CLIConfigDir:       p.CLIConfigDir,
+		CLIAuthTokenFile:   p.CLIAuthTokenFile,
+		CyberAccessProgram: p.CyberAccessProgram,
+		RatePerSecond:      p.RatePerSecond,
+		RatePerMinute:      p.RatePerMinute,
+		ContextWindowK:     p.ContextWindowK,
+		ThinkingType:       p.ThinkingType,
+		ReasoningEffort:    p.ReasoningEffort,
+		IsDefault:          p.IsDefault,
+		Priority:           p.Priority,
+		PoolExclude:        p.PoolExclude,
+		Streaming:          p.Streaming,
+		MaxTokens:          p.MaxTokens,
+		MaxTokensField:     p.MaxTokensField,
+		SessionHeaderKey:   p.SessionHeaderKey,
+		UserAgent:          p.UserAgent,
+		CustomHeadersSet:   p.CustomHeaders != "",
+		Retry:              p.Retry,
 	}
 }
 

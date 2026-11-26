@@ -25,11 +25,13 @@ type LLMProfile struct {
 	// CLIPath is the absolute Claude Code or Codex executable path. CLIConfigDir
 	// is that account's isolated CLAUDE_CONFIG_DIR/CODEX_HOME. OAuth tokens stay
 	// in the CLI-owned directory and are never copied into ARTEX.
-	CLIPath       string  `json:"cli_path,omitempty"`
-	CLIConfigDir  string  `json:"cli_config_dir,omitempty"`
-	APIKeyHint    string  `json:"api_key_hint,omitempty"`
-	RatePerSecond float64 `json:"rate_per_second"`
-	RatePerMinute float64 `json:"rate_per_minute"`
+	CLIPath            string  `json:"cli_path,omitempty"`
+	CLIConfigDir       string  `json:"cli_config_dir,omitempty"`
+	CLIAuthTokenFile   string  `json:"cli_auth_token_file,omitempty"`
+	CyberAccessProgram string  `json:"cyber_access_program,omitempty"`
+	APIKeyHint         string  `json:"api_key_hint,omitempty"`
+	RatePerSecond      float64 `json:"rate_per_second"`
+	RatePerMinute      float64 `json:"rate_per_minute"`
 	// ContextWindowK is the model's context window in K tokens, used to size
 	// compaction thresholds. 0 = use a 200K default; capped at 1000 (1M).
 	ContextWindowK int `json:"context_window_k"`
@@ -100,8 +102,8 @@ type RetryOverride struct {
 // profileCols is the read column list (hint variant, no api key) shared by the
 // list query; profileColsKey is the same with api_key for the single-row loads.
 const profileRetryCols = `COALESCE(retry_connect_attempts,0),COALESCE(retry_connect_interval_ms,0),COALESCE(retry_empty_attempts,0),COALESCE(retry_empty_interval_ms,0),COALESCE(retry_stream_attempts,0),COALESCE(retry_stream_interval_ms,0)`
-const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(price_input_per_m,0),COALESCE(price_output_per_m,0),COALESCE(price_cache_read_per_m,0),COALESCE(price_cache_write_per_m,0),COALESCE(user_agent,''),COALESCE(custom_headers,''),COALESCE(cli_path,''),COALESCE(cli_config_dir,'')`
-const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(price_input_per_m,0),COALESCE(price_output_per_m,0),COALESCE(price_cache_read_per_m,0),COALESCE(price_cache_write_per_m,0),COALESCE(user_agent,''),COALESCE(custom_headers,''),COALESCE(cli_path,''),COALESCE(cli_config_dir,'')`
+const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(price_input_per_m,0),COALESCE(price_output_per_m,0),COALESCE(price_cache_read_per_m,0),COALESCE(price_cache_write_per_m,0),COALESCE(user_agent,''),COALESCE(custom_headers,''),COALESCE(cli_path,''),COALESCE(cli_config_dir,''),COALESCE(cli_auth_token_file,''),COALESCE(cyber_access_program,'')`
+const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(price_input_per_m,0),COALESCE(price_output_per_m,0),COALESCE(price_cache_read_per_m,0),COALESCE(price_cache_write_per_m,0),COALESCE(user_agent,''),COALESCE(custom_headers,''),COALESCE(cli_path,''),COALESCE(cli_config_dir,''),COALESCE(cli_auth_token_file,''),COALESCE(cyber_access_program,'')`
 
 // scanProfile reads one row in the profileCols / profileColsKey column order. The
 // 7th column lands in APIKeyHint or APIKey depending on which list the caller used.
@@ -113,7 +115,7 @@ func scanProfile(sc interface{ Scan(...any) error }, into *string, p *LLMProfile
 		&p.Retry.Empty.Attempts, &p.Retry.Empty.IntervalMS,
 		&p.Retry.Stream.Attempts, &p.Retry.Stream.IntervalMS,
 		&p.PriceInputPerM, &p.PriceOutputPerM, &p.PriceCacheReadPerM, &p.PriceCacheWritePerM,
-		&p.UserAgent, &p.CustomHeaders, &p.CLIPath, &p.CLIConfigDir)
+		&p.UserAgent, &p.CustomHeaders, &p.CLIPath, &p.CLIConfigDir, &p.CLIAuthTokenFile, &p.CyberAccessProgram)
 	if err != nil {
 		return err
 	}
@@ -269,8 +271,8 @@ func (d *DB) saveProfilePrices(id int64, p *LLMProfile) (sql.Result, error) {
 }
 
 func (d *DB) saveProfileCLI(id int64, p *LLMProfile) (sql.Result, error) {
-	return d.Exec(`UPDATE llm_profiles SET cli_path=$1,cli_config_dir=$2 WHERE id=$3`,
-		strings.TrimSpace(p.CLIPath), strings.TrimSpace(p.CLIConfigDir), id)
+	return d.Exec(`UPDATE llm_profiles SET cli_path=$1,cli_config_dir=$2,cli_auth_token_file=$3,cyber_access_program=$4 WHERE id=$5`,
+		strings.TrimSpace(p.CLIPath), strings.TrimSpace(p.CLIConfigDir), strings.TrimSpace(p.CLIAuthTokenFile), strings.TrimSpace(p.CyberAccessProgram), id)
 }
 
 var (

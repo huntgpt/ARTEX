@@ -410,6 +410,8 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     -- operator-selected paths are persisted; tokens remain owned by the CLI.
     cli_path         TEXT NOT NULL DEFAULT '',
     cli_config_dir   TEXT NOT NULL DEFAULT '',
+    cli_auth_token_file TEXT NOT NULL DEFAULT '',
+    cyber_access_program TEXT NOT NULL DEFAULT '' CHECK (cyber_access_program IN ('','standard','daybreak_blue','daybreak_red')),
     -- Retry overrides: attempts 0=use global default / -1=disable / >0=use this value; interval 0=use default exponential backoff / >0=fixed milliseconds.
     -- The three groups correspond to connect retry, empty-response retry, and same-provider safe-window retry; see the ALTER comment below.
     retry_connect_attempts    INTEGER NOT NULL DEFAULT 0,
@@ -435,7 +437,13 @@ ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS streaming    BOOLEAN NOT NULL 
 -- Runs at every startup, idempotent: drop the old CHECK first, then create the current format CHECK.
 ALTER TABLE llm_profiles DROP CONSTRAINT IF EXISTS llm_profiles_format_check;
 ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_format_check
-    CHECK (format IN ('openai','anthropic','openai-responses','ollama','bedrock-gateway'));
+    CHECK (format IN ('openai','anthropic','openai-responses','ollama','bedrock-gateway','claude-cli','codex-cli'));
+
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS cyber_access_program TEXT NOT NULL DEFAULT '';
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS cli_auth_token_file TEXT NOT NULL DEFAULT '';
+ALTER TABLE llm_profiles DROP CONSTRAINT IF EXISTS llm_profiles_cyber_access_program_check;
+ALTER TABLE llm_profiles ADD CONSTRAINT llm_profiles_cyber_access_program_check
+    CHECK (cyber_access_program IN ('','standard','daybreak_blue','daybreak_red'));
 
 -- Output cap and its field name; backfills old databases. Defaults 0 / '' = send no cap and keep the max_tokens field name;
 -- old configs behave exactly as before.

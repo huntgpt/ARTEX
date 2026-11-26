@@ -369,6 +369,8 @@ function ProfileSheet({
   const [customHeaders, setCustomHeaders] = React.useState("");
   const [cliPath, setCliPath] = React.useState("");
   const [cliConfigDir, setCliConfigDir] = React.useState("");
+  const [cliAuthTokenFile, setCliAuthTokenFile] = React.useState("");
+  const [cyberAccessProgram, setCyberAccessProgram] = React.useState("none");
   const [clearCustomHeaders, setClearCustomHeaders] = React.useState(false);
   const [retry, setRetry] = React.useState<LLMRetryOverride>(ZERO_OVERRIDE); // retry override for this profile; all 0 = follow the global
   const [testing, setTesting] = React.useState(false);
@@ -411,6 +413,8 @@ function ProfileSheet({
     setCustomHeaders("");
     setCliPath(profile?.cli_path ?? "");
     setCliConfigDir(profile?.cli_config_dir ?? "");
+    setCliAuthTokenFile(profile?.cli_auth_token_file ?? "");
+    setCyberAccessProgram(profile?.cyber_access_program || "none");
     setClearCustomHeaders(false);
     setRetry(profile?.retry ?? ZERO_OVERRIDE);
     setApiKey("");
@@ -472,6 +476,8 @@ function ProfileSheet({
         customHeaders,
         cliPath.trim(),
         cliConfigDir.trim(),
+        format === "claude-cli" ? cliAuthTokenFile.trim() : "",
+        format === "codex-cli" && cyberAccessProgram !== "none" ? cyberAccessProgram : "",
       );
       // Show the reply too: only when the model demonstrably spoke is this the same as working inside a session.
       if (r.ok)
@@ -523,6 +529,8 @@ function ProfileSheet({
         clear_custom_headers: clearCustomHeaders,
         cli_path: cliPath.trim(),
         cli_config_dir: cliConfigDir.trim(),
+        cli_auth_token_file: format === "claude-cli" ? cliAuthTokenFile.trim() : "",
+        cyber_access_program: format === "codex-cli" && cyberAccessProgram !== "none" ? cyberAccessProgram : "",
         retry,
       });
       if (isNew)
@@ -727,6 +735,40 @@ function ProfileSheet({
                   one directory per account so task pinning and failover cannot mix identities.
                 </p>
               </div>
+              {format === "claude-cli" && (
+                <div className="grid gap-2">
+                  <Label htmlFor="p-cli-token-file">OAuth token file (optional)</Label>
+                  <Input
+                    id="p-cli-token-file"
+                    className="font-mono"
+                    placeholder="/secure/artex/claude/account-a/oauth-token"
+                    value={cliAuthTokenFile}
+                    onChange={(e) => setCliAuthTokenFile(e.target.value)}
+                  />
+                  <p className="text-muted-foreground text-xs">
+                    Must be an absolute, owner-only file (mode 0600). ARTEX passes it to Claude over an inherited file
+                    descriptor; the token is not placed in command arguments, environment variables, API responses, or logs.
+                  </p>
+                </div>
+              )}
+              {format === "codex-cli" && (
+                <div className="grid gap-2">
+                  <Label>Cyber access program</Label>
+                  <Select value={cyberAccessProgram} onValueChange={setCyberAccessProgram}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Account default</SelectItem>
+                      <SelectItem value="standard">standard</SelectItem>
+                      <SelectItem value="daybreak_blue">daybreak_blue</SelectItem>
+                      <SelectItem value="daybreak_red">daybreak_red</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-muted-foreground text-xs">
+                    Explicitly requests the Codex cyber policy tier for authorized assessment prompts. This does not
+                    disable ARTEX permissions, the read-only bridge sandbox, or impact gates.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

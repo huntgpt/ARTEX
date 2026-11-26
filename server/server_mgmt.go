@@ -2143,13 +2143,13 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 		p.CustomHeaders, p.UserAgent, p.SessionHeaderKey = "", "", ""
 		p.ClearCustomHeaders = true
 		validate := agent.ConfigFrom(p.Format, p.Model, "", "", "")
-		validate.CLIPath, validate.CLIConfigDir = p.CLIPath, p.CLIConfigDir
+		validate.CLIPath, validate.CLIConfigDir, validate.CLIAuthTokenFile, validate.CyberAccessProgram = p.CLIPath, p.CLIConfigDir, p.CLIAuthTokenFile, p.CyberAccessProgram
 		if _, err := validate.NewProvider(); err != nil {
 			writeErr(w, 400, err.Error())
 			return
 		}
 	} else {
-		p.CLIPath, p.CLIConfigDir = "", ""
+		p.CLIPath, p.CLIConfigDir, p.CLIAuthTokenFile, p.CyberAccessProgram = "", "", "", ""
 	}
 	if p.Format == "bedrock-gateway" {
 		if _, err := agent.ParseBedrockGatewayHeaders(p.CustomHeaders); err != nil {

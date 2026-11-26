@@ -73,6 +73,41 @@ printf '%s\n' '{"is_error":false,"result":"{\"text\":\"OK\",\"tool_calls\":[],\"
 	}
 }
 
+func TestCLIProviderClaudeOAuthTokenUsesPrivateFileDescriptor(t *testing.T) {
+	exe := writeFakeCLI(t, `
+test "${CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR:-}" = "3"
+test -z "${CLAUDE_CODE_OAUTH_TOKEN:-}"
+IFS= read -r token <&3
+test "$token" = "oauth-test-token"
+printf '%s\n' '{"is_error":false,"result":"{\"text\":\"OK\",\"tool_calls\":[],\"stop_reason\":\"end_turn\"}","usage":{"input_tokens":1,"output_tokens":1}}'
+`)
+	tokenFile := filepath.Join(t.TempDir(), "oauth-token")
+	if err := os.WriteFile(tokenFile, []byte("oauth-test-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := newCLIProvider(Config{
+		Format: FormatClaudeCLI, Model: "test", CLIPath: exe,
+		CLIConfigDir: t.TempDir(), CLIAuthTokenFile: tokenFile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, _, _, err := provider.Complete(context.Background(), llm.CompletionRequest{Messages: []llm.Message{llm.UserText("ping")}})
+	if err != nil || message.Text() != "OK" {
+		t.Fatalf("message=%+v err=%v", message, err)
+	}
+
+	if err := os.Chmod(tokenFile, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newCLIProvider(Config{
+		Format: FormatClaudeCLI, Model: "test", CLIPath: exe,
+		CLIConfigDir: t.TempDir(), CLIAuthTokenFile: tokenFile,
+	}); err == nil || !strings.Contains(err.Error(), "group or other") {
+		t.Fatalf("insecure token file error=%v", err)
+	}
+}
+
 func TestCLIProviderRejectsUnknownToolsAndSharedImplicitProfile(t *testing.T) {
 	_, err := newCLIProvider(Config{Format: FormatCodexCLI, Model: "test", CLIPath: os.Args[0], CLIConfigDir: "relative"})
 	if err == nil || !strings.Contains(err.Error(), "absolute path") {

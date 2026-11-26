@@ -1180,6 +1180,8 @@ export const api = {
     custom_headers = "",
     cli_path = "",
     cli_config_dir = "",
+    cli_auth_token_file = "",
+    cyber_access_program = "",
   ) =>
     // reply = the model's actual reply (truncated); the backend marks a profile that replies with nothing as failed
     post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>("/llm/test", {
@@ -1197,6 +1199,8 @@ export const api = {
       custom_headers,
       cli_path,
       cli_config_dir,
+      cli_auth_token_file,
+      cyber_access_program,
     }),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
   saveLLMProfile: (p: {
@@ -1223,6 +1227,8 @@ export const api = {
     clear_custom_headers?: boolean;
     cli_path?: string;
     cli_config_dir?: string;
+    cli_auth_token_file?: string;
+    cyber_access_program?: string;
     retry?: LLMRetryOverride; // this profile's retry override; all zeros = follow the global retry policy
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
