@@ -698,6 +698,9 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.ingestBbot(),
 		// scanner output (nmap -oX) by path, without the raw output.
 		t.ingestScanOutput(),
+		// Operator-supplied AD collector output. Catalogued but deliberately
+		// unbound by default; enabling it imports into the task-private AD graph.
+		t.ingestADObservation(),
 		// Task credentials (#3): reuse user-declared test accounts, record
 		// self-registered ones so they are not forgotten.
 		t.saveTaskCredential(), t.listTaskCredentials(),

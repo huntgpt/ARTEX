@@ -77,7 +77,10 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 // complete] from the global level — heavyweight with misjudgment risk, and
 // redundant with "prove_goal marks the last goal → automatic completion", so it is
 // given to no agent by default; bind it manually when needed.
-var defaultUnbound = map[string]bool{"goal_met": true}
+var defaultUnbound = map[string]bool{
+	"goal_met":              true,
+	"ingest_ad_observation": true,
+}
 
 // BuiltinToolSeeds dedupes and merges each agent's built-in tool set into the seed
 // list: tools with the same name (e.g. list_assets, which several agents have)
