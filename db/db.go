@@ -109,20 +109,34 @@ func DSN() (dsn, source string, err error) {
 	return config.PostgresDSN()
 }
 
-// SuffixTestDatabase rewrites the ARTEX_PG_DSN environment variable so its
-// database name carries the given suffix (artex -> artex_agent). Called from
-// package TestMain functions so every go test package runs against its own
-// database: parallel package processes then cannot contend on the same tables
-// (the under-load deadlock family, #80). No-op when ARTEX_PG_DSN is unset —
-// config-file and production paths are untouched. Open creates the suffixed
-// database automatically (ensureDatabase).
+// SuffixTestDatabase rewrites the resolved PostgreSQL DSN so its database name
+// carries the given suffix (artex -> artex_agent). Called from package TestMain
+// functions so every go test package runs against its own database: parallel
+// package processes then cannot contend on the same tables (the under-load
+// deadlock family, #80).
+//
+// Resolve first, rather than looking only at ARTEX_PG_DSN. Docker/dev commonly
+// supplies ARTEX_PG_HOST/USER/PASSWORD/DBNAME instead of one URL; leaving that
+// path untouched made go test connect to the live ARTEX database and test
+// cleanup queries could delete runtime assets. A config-file DSN is isolated
+// for the same reason. If the configured DSN is not a PostgreSQL URL that can
+// be suffixed safely, install a deliberately non-routable local DSN instead of
+// falling through to the live database. Open creates a valid suffixed database
+// automatically (ensureDatabase).
 func SuffixTestDatabase(suffix string) {
-	v := strings.TrimSpace(os.Getenv("ARTEX_PG_DSN"))
-	if v == "" {
+	suffix = strings.TrimSpace(suffix)
+	if suffix == "" {
+		return
+	}
+	v, _, err := DSN()
+	if err != nil {
 		return
 	}
 	u, err := url.Parse(v)
-	if err != nil || u.Path == "" || u.Path == "/" {
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Path == "" || u.Path == "/" {
+		// Fail closed. This address rejects immediately on every supported host;
+		// tests skip/fail as database-unavailable instead of touching production.
+		_ = os.Setenv("ARTEX_PG_DSN", "postgres://artex-test-isolation@127.0.0.1:1/artex_test_isolation_unavailable?sslmode=disable")
 		return
 	}
 	u.Path = "/" + strings.TrimPrefix(u.Path, "/") + "_" + suffix

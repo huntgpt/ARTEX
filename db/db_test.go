@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
+	"os"
 	"testing"
 	"time"
 
@@ -66,6 +68,61 @@ func TestCreateDatabaseSQLQuotesName(t *testing.T) {
 		if got := createDatabaseSQL(tt.name); got != tt.want {
 			t.Errorf("createDatabaseSQL(%q)=%q, want %q", tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestSuffixTestDatabaseIsolatesEveryConfiguredEnvironmentForm(t *testing.T) {
+	clearComponents := func(t *testing.T) {
+		t.Helper()
+		for _, key := range []string{
+			"ARTEX_PG_HOST", "ARTEX_PG_PORT", "ARTEX_PG_USER", "ARTEX_PG_PASSWORD",
+			"ARTEX_PG_DBNAME", "ARTEX_PG_SSLMODE",
+		} {
+			t.Setenv(key, "")
+		}
+	}
+	assertURL := func(t *testing.T, wantPath, wantPassword string) {
+		t.Helper()
+		u, err := url.Parse(os.Getenv("ARTEX_PG_DSN"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		password, _ := u.User.Password()
+		if u.Path != wantPath || password != wantPassword {
+			t.Fatalf("isolated DSN path=%q password=%q, want path=%q password=%q", u.Path, password, wantPath, wantPassword)
+		}
+	}
+
+	t.Run("explicit DSN", func(t *testing.T) {
+		clearComponents(t)
+		t.Setenv("ARTEX_PG_DSN", "postgres://tester:pw@127.0.0.1:5432/artex?sslmode=disable")
+		SuffixTestDatabase("agent")
+		assertURL(t, "/artex_agent", "pw")
+	})
+
+	t.Run("component environment", func(t *testing.T) {
+		clearComponents(t)
+		t.Setenv("ARTEX_PG_DSN", "")
+		t.Setenv("ARTEX_PG_HOST", "127.0.0.1")
+		t.Setenv("ARTEX_PG_PORT", "5434")
+		t.Setenv("ARTEX_PG_USER", "artex")
+		t.Setenv("ARTEX_PG_PASSWORD", "p/ss word")
+		t.Setenv("ARTEX_PG_DBNAME", "artex")
+		t.Setenv("ARTEX_PG_SSLMODE", "disable")
+		SuffixTestDatabase("server")
+		assertURL(t, "/artex_server", "p/ss word")
+	})
+}
+
+func TestSuffixTestDatabaseFailsClosedForNonURLDSN(t *testing.T) {
+	t.Setenv("ARTEX_PG_DSN", "host=production.internal dbname=artex user=artex")
+	SuffixTestDatabase("db")
+	u, err := url.Parse(os.Getenv("ARTEX_PG_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "127.0.0.1:1" || u.Path != "/artex_test_isolation_unavailable" {
+		t.Fatalf("unsafe fallback DSN %q", u.String())
 	}
 }
 
