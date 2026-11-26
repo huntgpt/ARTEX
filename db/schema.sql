@@ -160,6 +160,14 @@ CREATE TABLE IF NOT EXISTS explorations (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Planner TodoWrite scratchpad survives backend restarts. It is separate from
+-- graph nodes because it is mutable orchestration state, not assessment evidence.
+CREATE TABLE IF NOT EXISTS planner_todos (
+    exploration_id BIGINT PRIMARY KEY REFERENCES explorations(id) ON DELETE CASCADE,
+    items          JSONB NOT NULL DEFAULT '[]'::jsonb
+                   CHECK (jsonb_typeof(items) = 'array'),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 -- cold-digest (§2.3): per-task planner round counter — bumped once each time the
 -- planner wakes and processes a round. Drives the ≥R cold-node debounce (measured in
 -- this exploration's own rounds, not global node ids or wall-clock).

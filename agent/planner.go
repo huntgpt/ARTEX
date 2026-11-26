@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,16 +122,79 @@ func (p *Planner) SetLessonsBlock(block string) { p.lessonsBlock = block }
 func (p *Planner) wantConstraints() bool { return p.injectConstraints == nil || p.injectConstraints() }
 
 // todoFor returns the task's persistent planning todo store, creating it on first
-// use. Shared across all of this task's planner wake-ups.
-func (p *Planner) todoFor(expID int64) *actool.TodoStore {
+// use and hydrating it from PostgreSQL. The in-memory store is shared across this
+// process's wake-ups; the database copy survives backend restarts.
+func (p *Planner) todoFor(ts *db.ExplorationStore) (*actool.TodoStore, error) {
 	p.todoMu.Lock()
 	defer p.todoMu.Unlock()
+	expID := ts.ID()
 	s := p.todos[expID]
 	if s == nil {
+		items, err := ts.LoadPlannerTodos()
+		if err != nil {
+			return nil, fmt.Errorf("load planner todos: %w", err)
+		}
 		s = actool.NewTodoStore()
+		seed := make([]actool.Todo, 0, len(items))
+		for _, item := range items {
+			seed = append(seed, actool.Todo{Content: item.Content, Status: actool.TodoStatus(item.Status)})
+		}
+		raw, err := json.Marshal(map[string]any{"todos": seed})
+		if err != nil {
+			return nil, fmt.Errorf("encode planner todos: %w", err)
+		}
+		if _, err := s.Tool().Call(context.Background(), raw, nil); err != nil {
+			return nil, fmt.Errorf("hydrate planner todos: %w", err)
+		}
 		p.todos[expID] = s
 	}
-	return s
+	return s, nil
+}
+
+func savePlannerTodos(ts *db.ExplorationStore, store *actool.TodoStore) error {
+	items := store.List()
+	durable := make([]db.PlannerTodo, 0, len(items))
+	for _, item := range items {
+		durable = append(durable, db.PlannerTodo{Content: item.Content, Status: string(item.Status)})
+	}
+	if err := ts.SavePlannerTodos(durable); err != nil {
+		return fmt.Errorf("save planner todos: %w", err)
+	}
+	return nil
+}
+
+// plannerTodoHooks flushes each successful TodoWrite immediately. The final
+// Plan defer remains as a backstop, while this hook closes the crash window
+// between TodoWrite and the end of a long planner round.
+type plannerTodoHooks struct {
+	inner harness.HookRunner
+	ts    *db.ExplorationStore
+	store *actool.TodoStore
+}
+
+func (h plannerTodoHooks) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
+	if h.inner != nil {
+		return h.inner.PreToolUse(ctx, name, input)
+	}
+	return false, "", nil
+}
+
+func (h plannerTodoHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
+	if h.inner != nil {
+		h.inner.PostToolUse(ctx, name, input, result, isErr)
+	}
+	if name == "TodoWrite" && !isErr {
+		if err := savePlannerTodos(h.ts, h.store); err != nil {
+			log.Printf("[planner] persist TodoWrite for exploration %d: %v", h.ts.ID(), err)
+		}
+	}
+}
+
+func (h plannerTodoHooks) Stop(ctx context.Context, messages []llm.Message) (bool, []string, string) {
+	if h.inner != nil {
+		return h.inner.Stop(ctx, messages)
+	}
+	return false, nil, ""
 }
 
 // SetKillWork wires the engine's per-work terminate callback so the planner's
@@ -522,6 +586,18 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
+	todoStore, err := p.todoFor(ts)
+	if err != nil {
+		return false, "", err
+	}
+	// TodoWrite replaces the complete list. Persist it even when the LLM/provider
+	// round fails after updating the chain, so a backend restart cannot reorder
+	// the remaining prerequisite steps.
+	defer func() {
+		if saveErr := savePlannerTodos(ts, todoStore); saveErr != nil && err == nil {
+			err = saveErr
+		}
+	}()
 	tsx := NewToolSet(ts, "planner")
 	tsx.SetFindingRecorder(p.findingRecorder)
 	tsx.SetTriageClient(p.triage)
@@ -616,7 +692,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		MaxDuration:           maxDur,     // 0=unlimited; with a deadline = time remaining until it
 		Compaction:            compactionConfig(p.compactionWindow()),
 		// Planning todos shared across wake-ups: keep the serial chain across rounds (the session is new; the store isn't).
-		Todos: p.todoFor(ts.ID()),
+		Todos: todoStore,
 		// Hitting [this round's] turn budget → the SDK runs wrap-up: land what this round
 		// has already figured out (dispatch due add_intent, provable prove_goal, record the
 		// serial chain in TodoWrite) rather than stopping planning — the planner keeps
@@ -633,6 +709,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		opts.Hooks = hooks
 	}
 	opts.Hooks = SpillHooks(opts.Hooks, opts.ToolOutputDir)
+	opts.Hooks = plannerTodoHooks{inner: opts.Hooks, ts: ts, store: todoStore}
 	// The session id is the provider-side identity (session header, usage metering)
 	// with or without persistence; Norma only puts it on ctx when it writes a transcript.
 	opts.SessionID = fmt.Sprintf("exp%d-planner", ts.ID())
