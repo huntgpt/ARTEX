@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/netip"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // executeExtraTool is the tool that runs a deferred tool (every MCP tool, and
@@ -90,13 +93,152 @@ func extractDeclared(toolName string, input []byte) targetList {
 			out.urls = append(out.urls, strings.TrimSpace(u))
 		}
 	case "Bash", "shell_open", "Monitor":
-		out.scan(declaredFields(input).Command)
+		out.scanShell(declaredFields(input).Command)
 	case "shell_send":
-		out.scan(declaredFields(input).Text)
+		out.scanShell(declaredFields(input).Text)
 	default:
 		out.scanStrings(input)
 	}
 	return out
+}
+
+// localTextPrograms only contains commands whose literal arguments are data or
+// local file names and which cannot execute an argument. In particular, sed,
+// awk, find and xargs are absent because their arguments can execute commands.
+// A local command in a pipeline with any other program is not suppressed: its
+// output could be configuration or a script consumed by a network-capable
+// process.
+var localTextPrograms = toolSet(
+	"cat", "comm", "cut", "diff", "echo", "fgrep", "file", "grep", "head",
+	"jq", "md5", "md5sum", "paste", "printf", "rg", "sha1sum", "sha256sum",
+	"sha512sum", "shasum", "sort", "stat", "strings", "tail", "tr", "uniq", "wc",
+)
+
+type shellCall struct {
+	from, to int
+	local    bool
+}
+
+type shellPipe struct {
+	from, to int
+	unsafe   bool
+}
+
+// scanShell removes only arguments to unambiguously local text-processing
+// commands before applying the ordinary target scanner. This prevents a grep
+// pattern such as 'https://api.example/...' from becoming a network target.
+// Syntax errors and dynamic/local calls are deliberately scanned unchanged.
+func (l *targetList) scanShell(command string) {
+	if command == "" {
+		return
+	}
+	f, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		l.scan(command)
+		return
+	}
+
+	var calls []shellCall
+	var pipes []shellPipe
+	syntax.Walk(f, func(node syntax.Node) bool {
+		switch n := node.(type) {
+		case *syntax.CallExpr:
+			from, to := int(n.Pos().Offset()), int(n.End().Offset())
+			calls = append(calls, shellCall{from: from, to: to, local: safeLocalTextCall(n)})
+		case *syntax.BinaryCmd:
+			if n.Op == syntax.Pipe || n.Op == syntax.PipeAll {
+				pipes = append(pipes, shellPipe{from: int(n.Pos().Offset()), to: int(n.End().Offset())})
+			}
+		}
+		return true
+	})
+
+	// A pipe is safe to suppress only when every command inside it is a
+	// literal local text command. Nested command/process substitutions make
+	// their containing call non-local in safeLocalTextCall.
+	for i := range pipes {
+		for _, call := range calls {
+			if pipes[i].from <= call.from && call.to <= pipes[i].to && !call.local {
+				pipes[i].unsafe = true
+				break
+			}
+		}
+	}
+
+	b := []byte(command)
+	for _, call := range calls {
+		if !call.local || call.from < 0 || call.to > len(b) || call.from >= call.to {
+			continue
+		}
+		unsafePipe := false
+		for _, pipe := range pipes {
+			if pipe.unsafe && pipe.from <= call.from && call.to <= pipe.to {
+				unsafePipe = true
+				break
+			}
+		}
+		if unsafePipe {
+			continue
+		}
+		for i := call.from; i < call.to; i++ {
+			b[i] = ' '
+		}
+	}
+	l.scan(string(b))
+}
+
+func safeLocalTextCall(call *syntax.CallExpr) bool {
+	if len(call.Assigns) != 0 || len(call.Args) == 0 {
+		return false
+	}
+	program, ok := literalShellWord(call.Args[0])
+	if !ok || !localTextPrograms[filepath.Base(program)] {
+		return false
+	}
+	safe := true
+	for _, arg := range call.Args[1:] {
+		syntax.Walk(arg, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst:
+				safe = false
+				return false
+			}
+			return safe
+		})
+		if !safe {
+			return false
+		}
+	}
+	return true
+}
+
+func literalShellWord(word *syntax.Word) (string, bool) {
+	var out strings.Builder
+	for _, part := range word.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			out.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			if p.Dollar {
+				return "", false
+			}
+			out.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			if p.Dollar {
+				return "", false
+			}
+			for _, quoted := range p.Parts {
+				literal, ok := quoted.(*syntax.Lit)
+				if !ok {
+					return "", false
+				}
+				out.WriteString(literal.Value)
+			}
+		default:
+			return "", false
+		}
+	}
+	return out.String(), true
 }
 
 // declaredInput holds the fields of the built-in tools that carry a target.

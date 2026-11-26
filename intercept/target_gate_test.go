@@ -276,6 +276,15 @@ func TestGateOffTouchesNothing(t *testing.T) {
 	}
 }
 
+func TestGateIgnoresTargetsUsedOnlyAsLocalText(t *testing.T) {
+	g := newGate(t)
+	inspection := `printf '%s\n' '=== API anchors ===' && grep -rhoaE '.{0,120}(https://hermes-api\.pttdigital\.com|/api/[A-Za-z0-9_?&=./:{}-]+).{0,220}' js/*.js | sort -u | head -20`
+	g.passes("local inspection", g.check("Bash", fmt.Sprintf(`{"command":%q}`, inspection)))
+	if g.store.reads != 0 || g.res.total() != 0 {
+		t.Fatalf("local inspection: %d store reads, %d lookups, want none", g.store.reads, g.res.total())
+	}
+}
+
 func TestGateStateMachine(t *testing.T) {
 	g := newGate(t)
 	g.res.set("app.example.com", "203.0.113.7")

@@ -163,6 +163,42 @@ func TestExtractTargets(t *testing.T) {
 	}
 }
 
+func TestExtractTargetsIgnoresLocalShellText(t *testing.T) {
+	// Regression for Task #2 intent #5196: this command only inspects files
+	// already on disk. The URL is a grep expression, not a network destination.
+	inspection := `printf '%s\n' '=== static APIs ===' && sed -n '1,20p' api_static.txt && printf '%s\n' '=== frontend routes ===' && sed -n '1,20p' routes.txt && printf '%s\n' '=== sourceMappingURL references ===' && grep -rhoE 'sourceMappingURL=[^[:space:]]+' js/*.js | sort -u | head -20 && printf '%s\n' '=== API/base URL anchors ===' && grep -rhoaE '.{0,120}(https://hermes-api\.pttdigital\.com|/api/[A-Za-z0-9_?&=./:{}-]+).{0,220}' js/*.js | head -20`
+	for _, tool := range []string{"Bash", "shell_open", "Monitor"} {
+		wantTargets(t, tool+" local inspection", targetsOf(tool, command(inspection)))
+	}
+	wantTargets(t, "shell_send local inspection", targetsOf("shell_send", map[string]string{"text": inspection + "\n"}))
+
+	// Local commands in independent statements are ignored, while actual
+	// network clients in the same shell program remain gated.
+	wantTargets(t, "local and network statements", targetsOf("Bash", command(
+		`grep -E 'https://not-a-target.example/' downloaded.js; curl https://remote.example/; wget -q https://download.example/pkg; nmap 203.0.113.7; openssl s_client -connect tls.example:443`,
+	)),
+		Target{TargetDomain, "remote.example", 443},
+		Target{TargetDomain, "download.example", 443},
+		Target{TargetIP, "203.0.113.7", 0},
+		Target{TargetDomain, "tls.example", 443},
+	)
+
+	// Do not suppress local-looking producer arguments when another process in
+	// the pipeline may consume them as a script or network-client config.
+	wantTargets(t, "local data piped to shell", targetsOf("Bash", command(
+		`printf '%s\n' 'https://piped.example/' | sh`,
+	)), Target{TargetDomain, "piped.example", 443})
+	wantTargets(t, "local data piped to curl", targetsOf("Bash", command(
+		`printf '%s\n' 'url=https://config.example/' | curl --config -`,
+	)), Target{TargetDomain, "config.example", 443})
+	wantTargets(t, "command substitution remains gated", targetsOf("Bash", command(
+		`printf '%s\n' "$(curl https://nested.example/)"`,
+	)), Target{TargetDomain, "nested.example", 443})
+	wantTargets(t, "parse failure is fail closed", targetsOf("Bash", command(
+		`curl https://fallback.example/ |`,
+	)), Target{TargetDomain, "fallback.example", 443})
+}
+
 // Every MCP tool and every deferred custom tool is called through
 // ExecuteExtraTool: the gate reads the inner tool name and its parameters.
 func TestExtractUnwrapsExecuteExtraTool(t *testing.T) {
