@@ -4,11 +4,16 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/norma/llm"
 )
 
@@ -116,5 +121,148 @@ func TestCLIProviderRejectsUnknownToolsAndSharedImplicitProfile(t *testing.T) {
 	_, _, err = normalizeCLIBridgeResponse(cliBridgeResponse{ToolCalls: []cliBridgeToolCall{{Name: "not-allowed", InputJSON: `{}`}}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown ARTEX tool") {
 		t.Fatalf("unknown tool error=%v", err)
+	}
+}
+
+func TestCLIProviderCallTimeoutConfiguration(t *testing.T) {
+	t.Setenv("ARTEX_LLM_CLI_TIMEOUT", "")
+	if got, err := resolveCLICallTimeout(0); err != nil || got != defaultCLICallTimeout {
+		t.Fatalf("default timeout = %s, %v; want %s", got, err, defaultCLICallTimeout)
+	}
+	if got, err := resolveCLICallTimeout(75 * time.Millisecond); err != nil || got != 75*time.Millisecond {
+		t.Fatalf("explicit timeout = %s, %v", got, err)
+	}
+	t.Setenv("ARTEX_LLM_CLI_TIMEOUT", "7m")
+	if got, err := resolveCLICallTimeout(0); err != nil || got != 7*time.Minute {
+		t.Fatalf("environment timeout = %s, %v", got, err)
+	}
+	for _, value := range []string{"not-a-duration", "1s", "31m"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("ARTEX_LLM_CLI_TIMEOUT", value)
+			if _, err := resolveCLICallTimeout(0); err == nil {
+				t.Fatalf("invalid timeout %q accepted", value)
+			}
+		})
+	}
+}
+
+func TestCLIProviderTimeoutKillsProcessGroupAndPreservesPartialOutput(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("process-group cancellation is guaranteed on macOS and Linux")
+	}
+	exe := writeFakeCLI(t, `
+printf '%s\n' 'partial-timeout-evidence' >&2
+(
+  while :; do
+    printf x >> "${CLAUDE_CONFIG_DIR}/heartbeat"
+    sleep 0.02
+  done
+) &
+wait
+`)
+	configDir := t.TempDir()
+	provider, err := newCLIProvider(Config{
+		Format: FormatClaudeCLI, Model: "test", CLIPath: exe,
+		// macOS can take hundreds of milliseconds to spawn /bin/sh under the
+		// race detector; leave enough time to prove the descendant started.
+		CLIConfigDir: configDir, CLICallTimeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, _, _, err = provider.Complete(context.Background(), llm.CompletionRequest{Messages: []llm.Message{llm.UserText("ping")}})
+	if !errors.Is(err, ErrCLIProviderTimeout) {
+		t.Fatalf("timeout error = %v", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("provider timeout must not classify as task deadline: %v", err)
+	}
+	var networkError net.Error
+	if !errors.As(err, &networkError) || !networkError.Timeout() || !networkError.Temporary() {
+		t.Fatalf("timeout is not classified as retryable net.Error: %T %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "partial-timeout-evidence") {
+		t.Fatalf("partial stderr was not preserved in provider error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("timeout returned after %s", elapsed)
+	}
+
+	heartbeat := filepath.Join(configDir, "heartbeat")
+	before, statErr := os.Stat(heartbeat)
+	if statErr != nil || before.Size() == 0 {
+		t.Fatalf("descendant never started: info=%v err=%v", before, statErr)
+	}
+	time.Sleep(150 * time.Millisecond)
+	after, statErr := os.Stat(heartbeat)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("CLI descendant survived process-group cancellation: heartbeat grew %d -> %d", before.Size(), after.Size())
+	}
+}
+
+func TestCLIProviderParentCancellationIsNotProviderTimeout(t *testing.T) {
+	exe := writeFakeCLI(t, `sleep 10`)
+	provider, err := newCLIProvider(Config{
+		Format: FormatClaudeCLI, Model: "test", CLIPath: exe,
+		CLIConfigDir: t.TempDir(), CLICallTimeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	_, _, _, err = provider.Complete(ctx, llm.CompletionRequest{Messages: []llm.Message{llm.UserText("ping")}})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrCLIProviderTimeout) {
+		t.Fatalf("parent cancellation classification = %v", err)
+	}
+}
+
+func TestCLIProviderStreamTimeoutFailsOverToNextReadyProfile(t *testing.T) {
+	hanging := writeFakeCLI(t, `
+printf '%s\n' 'first-profile-stalled' >&2
+sleep 10
+`)
+	success := writeFakeCLI(t, `
+printf '%s\n' '{"is_error":false,"result":"{\"text\":\"fallback-ok\",\"tool_calls\":[],\"stop_reason\":\"end_turn\"}","usage":{"input_tokens":2,"output_tokens":1}}'
+`)
+	first, err := newCLIProvider(Config{
+		Format: FormatClaudeCLI, Model: "first", CLIPath: hanging,
+		CLIConfigDir: t.TempDir(), CLICallTimeout: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := newCLIProvider(Config{
+		Format: FormatClaudeCLI, Model: "second", CLIPath: success,
+		CLIConfigDir: t.TempDir(), CLICallTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := llmpool.New([]*llmpool.Member{
+		{ID: 1, Name: "stalled", Model: "first", Rank: 2, Prov: first},
+		{ID: 2, Name: "ready", Model: "second", Rank: 1, Prov: second},
+	}, nil)
+	var text, stop string
+	var usage llm.Usage
+	for event, streamErr := range pool.Stream(context.Background(), llm.CompletionRequest{Messages: []llm.Message{llm.UserText("ping")}}) {
+		if streamErr != nil {
+			t.Fatal(streamErr)
+		}
+		switch event.Type {
+		case llm.SEMessageStart:
+			usage = event.Usage
+		case llm.SETextDelta:
+			text += event.Text
+		case llm.SEMessageDelta:
+			stop = event.StopReason
+		}
+	}
+	if text != "fallback-ok" || stop != "end_turn" || usage.InputTokens != 2 || usage.OutputTokens != 1 {
+		t.Fatalf("fallback result: text=%q stop=%q usage=%+v", text, stop, usage)
 	}
 }

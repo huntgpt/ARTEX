@@ -11,14 +11,24 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/norma/llm"
 )
 
 const (
-	maxCLIBridgeInput  = 16 << 20
-	maxCLIBridgeOutput = 16 << 20
+	maxCLIBridgeInput        = 16 << 20
+	maxCLIBridgeOutput       = 16 << 20
+	defaultCLICallTimeout    = 5 * time.Minute
+	minimumEnvCLICallTimeout = 10 * time.Second
+	maximumEnvCLICallTimeout = 30 * time.Minute
 )
+
+// ErrCLIProviderTimeout classifies a local coding-CLI call which exceeded its
+// own provider deadline. It intentionally does not wrap context.DeadlineExceeded:
+// llmpool must be allowed to replay an atomic request on the next ready profile,
+// unlike a task/operator deadline which must stop the whole chain.
+var ErrCLIProviderTimeout = errors.New("local CLI provider call timed out")
 
 // cliProvider turns an installed, OAuth-authenticated coding CLI into a Norma
 // provider without handing that CLI any execution tools. ARTEX remains the
@@ -31,7 +41,24 @@ type cliProvider struct {
 	model         string
 	cyberTier     string
 	authTokenFile string
+	callTimeout   time.Duration
 }
+
+type cliProviderTimeoutError struct {
+	timeout time.Duration
+	cause   error
+}
+
+func (e *cliProviderTimeoutError) Error() string {
+	if e.cause == nil {
+		return fmt.Sprintf("%v after %s", ErrCLIProviderTimeout, e.timeout)
+	}
+	return fmt.Sprintf("%v after %s: %v", ErrCLIProviderTimeout, e.timeout, e.cause)
+}
+
+func (e *cliProviderTimeoutError) Unwrap() error   { return ErrCLIProviderTimeout }
+func (e *cliProviderTimeoutError) Timeout() bool   { return true }
+func (e *cliProviderTimeoutError) Temporary() bool { return true }
 
 type cliBridgeResponse struct {
 	Text       string              `json:"text"`
@@ -90,7 +117,29 @@ func newCLIProvider(c Config) (llm.Provider, error) {
 			return nil, errors.New("Claude OAuth token file must not be accessible by group or other users")
 		}
 	}
-	return &cliProvider{kind: c.Format, executable: exe, configDir: dir, model: strings.TrimSpace(c.Model), cyberTier: cyberTier, authTokenFile: authTokenFile}, nil
+	callTimeout, err := resolveCLICallTimeout(c.CLICallTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return &cliProvider{kind: c.Format, executable: exe, configDir: dir, model: strings.TrimSpace(c.Model), cyberTier: cyberTier, authTokenFile: authTokenFile, callTimeout: callTimeout}, nil
+}
+
+func resolveCLICallTimeout(configured time.Duration) (time.Duration, error) {
+	if configured > 0 {
+		return configured, nil
+	}
+	raw := strings.TrimSpace(os.Getenv("ARTEX_LLM_CLI_TIMEOUT"))
+	if raw == "" {
+		return defaultCLICallTimeout, nil
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse ARTEX_LLM_CLI_TIMEOUT: %w", err)
+	}
+	if timeout < minimumEnvCLICallTimeout || timeout > maximumEnvCLICallTimeout {
+		return 0, fmt.Errorf("ARTEX_LLM_CLI_TIMEOUT must be between %s and %s", minimumEnvCLICallTimeout, maximumEnvCLICallTimeout)
+	}
+	return timeout, nil
 }
 
 // validateCLIProfile resolves an optional executable name and requires an
@@ -204,7 +253,7 @@ ARTEX_REQUEST_JSON:
 
 func (p *cliProvider) runClaude(ctx context.Context, prompt string) (cliBridgeResponse, llm.Usage, error) {
 	args := []string{"--print", "--output-format", "json", "--model", p.model, "--restricted", "--safe-mode", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--permission-mode", "manual"}
-	out, stderr, err := runCLICommand(ctx, p.executable, args, prompt, p.configDir, FormatClaudeCLI, p.authTokenFile)
+	out, stderr, err := runCLICommand(ctx, p.callTimeout, p.executable, args, prompt, p.configDir, FormatClaudeCLI, p.authTokenFile)
 	if err != nil {
 		return cliBridgeResponse{}, llm.Usage{}, fmt.Errorf("Claude Code failed: %w: %s", err, clippedCLIError(stderr, out))
 	}
@@ -232,7 +281,7 @@ func (p *cliProvider) runCodex(ctx context.Context, prompt string) (cliBridgeRes
 		return cliBridgeResponse{}, llm.Usage{}, err
 	}
 	args := codexCLIArgs(p.model, p.cyberTier, runDir, schemaPath, answerPath)
-	out, stderr, err := runCLICommand(ctx, p.executable, args, prompt, p.configDir, FormatCodexCLI, "")
+	out, stderr, err := runCLICommand(ctx, p.callTimeout, p.executable, args, prompt, p.configDir, FormatCodexCLI, "")
 	usage := extractCLIUsage(out)
 	if err != nil {
 		return cliBridgeResponse{}, usage, fmt.Errorf("Codex CLI failed: %w: %s", err, clippedCLIError(stderr, out))
@@ -258,8 +307,10 @@ func codexCLIArgs(model, cyberTier, runDir, schemaPath, answerPath string) []str
 	return append(args, "--output-schema", schemaPath, "--output-last-message", answerPath, "-C", runDir, "-")
 }
 
-func runCLICommand(ctx context.Context, executable string, args []string, stdin, configDir string, kind llm.Format, authTokenFile string) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, executable, args...)
+func runCLICommand(ctx context.Context, timeout time.Duration, executable string, args []string, stdin, configDir string, kind llm.Format, authTokenFile string) ([]byte, []byte, error) {
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := newBoundedCLICommand(runCtx, executable, args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	cmd.Env = localCLIEnvironment(kind, configDir)
 	var tokenFile *os.File
@@ -277,6 +328,15 @@ func runCLICommand(ctx context.Context, executable string, args []string, stdin,
 	cmd.Stdout = &limitedBuffer{buffer: &stdout, remaining: maxCLIBridgeOutput}
 	cmd.Stderr = &limitedBuffer{buffer: &stderr, remaining: maxCLIBridgeOutput}
 	err := cmd.Run()
+	if err != nil {
+		// A parent cancellation is engagement/task control, never provider
+		// failover. Only the private per-call deadline is retryable.
+		if parentErr := ctx.Err(); parentErr != nil {
+			err = parentErr
+		} else if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			err = &cliProviderTimeoutError{timeout: timeout, cause: err}
+		}
+	}
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 

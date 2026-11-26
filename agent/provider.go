@@ -43,6 +43,11 @@ type Config struct {
 	CLIPath          string
 	CLIConfigDir     string
 	CLIAuthTokenFile string
+	// CLICallTimeout bounds one local Claude Code/Codex CLI provider call. Zero
+	// uses the safe built-in default (or ARTEX_LLM_CLI_TIMEOUT when set). This
+	// deadline is deliberately separate from the task context: expiry is a
+	// retryable provider failure, while operator/task cancellation remains final.
+	CLICallTimeout time.Duration
 	// CyberAccessProgram is an explicit Codex CLI cyber policy tier. Empty leaves
 	// the account default unchanged; supported values mirror `codex exec`.
 	CyberAccessProgram string
@@ -244,6 +249,7 @@ func compactionConfig(windowTokens int) *compaction.Config {
 //	ARTEX_LLM_MODEL    = model id        (default: per provider)
 //	ARTEX_LLM_BASE_URL = endpoint        (optional; ollama defaults to localhost:11434/v1)
 //	ARTEX_LLM_PROXY    = proxy URL        (optional; http/https/socks5)
+//	ARTEX_LLM_CLI_TIMEOUT = local CLI per-call total deadline (default 5m; 10s..30m)
 //	ANTHROPIC_API_KEY / OPENAI_API_KEY         = credentials (unused for ollama)
 func FromEnv() (Config, bool) {
 	// Case- and space-insensitive: "Ollama" used to miss every case below and
