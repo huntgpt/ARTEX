@@ -25,6 +25,9 @@ func TestRedTeamWorkflowDependenciesAndBlockers(t *testing.T) {
 	if len(runs) != len(RedTeamWorkflow) || runs[0].Phase != "passive_discovery" || runs[0].State != "ready" {
 		t.Fatalf("initial workflow=%+v", runs)
 	}
+	if runs[0].Dependencies == nil || runs[0].Tools == nil {
+		t.Fatalf("workflow arrays must serialize as [] rather than null: %+v", runs[0])
+	}
 	if runs[1].State != "pending" {
 		t.Fatalf("ownership should wait, got %s", runs[1].State)
 	}

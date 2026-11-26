@@ -851,7 +851,13 @@ export const api = {
   },
   redTeamWorkflow: (id: string) =>
     get<{ phases: import("@/lib/types").RedTeamPhaseRun[] }>(`/tasks/${id}/red-team-workflow`).then((r) => ({
-      phases: arr(r.phases),
+      // Older backends and pre-normalized fixtures can emit null for empty Go
+      // slices. Keep the Progress surface resilient at the API boundary.
+      phases: arr(r.phases).map((phase) => ({
+        ...phase,
+        tools: arr(phase.tools),
+        dependencies: arr(phase.dependencies),
+      })),
     })),
   transitionRedTeamPhase: (
     id: string,

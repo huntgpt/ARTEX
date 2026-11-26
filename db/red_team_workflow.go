@@ -157,6 +157,14 @@ func (d *DB) RedTeamWorkflowRuns(ctx context.Context, explorationID int64) ([]Re
 	out := make([]RedTeamPhaseRun, 0, len(RedTeamWorkflow))
 	for _, definition := range RedTeamWorkflow {
 		if run, ok := byPhase[definition.Phase]; ok {
+			// JSON arrays must stay arrays even when a phase has no dependencies.
+			// A nil slice marshals as null and used to crash the Progress UI.
+			if run.Tools == nil {
+				run.Tools = []string{}
+			}
+			if run.Dependencies == nil {
+				run.Dependencies = []string{}
+			}
 			out = append(out, run)
 		}
 	}

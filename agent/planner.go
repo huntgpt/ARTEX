@@ -43,6 +43,7 @@ type Planner struct {
 	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	workerCapacityFn  func() int                             // host worker-pool capacity; used to keep independent lanes occupied
 	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
 	// lessonsBlock is the raw RSI evidence block. Empty = off. Plan() frames it
 	// with a per-run data envelope (field=lessons) and appends it after the
@@ -83,11 +84,24 @@ func (p *Planner) SetNoaEnabled(fn func() bool) { p.noaEnabledFn = fn }
 // send no cap and let the endpoint decide. Read per run, like nonStreaming.
 func (p *Planner) SetMaxTokens(fn func() int) { p.maxTokensFn = fn }
 
+// SetWorkerCapacityResolver exposes the real task worker-pool size to the
+// planner. It is advisory rather than a quota: the planner fills idle slots only
+// with distinct, prerequisite-ready directions and never fabricates work merely
+// to reach the number.
+func (p *Planner) SetWorkerCapacityResolver(fn func() int) { p.workerCapacityFn = fn }
+
 func (p *Planner) maxTokens() int {
 	if p.maxTokensFn == nil {
 		return 0
 	}
 	return p.maxTokensFn()
+}
+
+func (p *Planner) workerCapacity() int {
+	if p.workerCapacityFn == nil {
+		return 0
+	}
+	return max(p.workerCapacityFn(), 0)
 }
 
 func (p *Planner) compactionWindow() int {
@@ -516,6 +530,41 @@ func plannerSituational(evs []TriggerEvent, look triggerLookup, data map[string]
 	return env.intro() + renderTriggers(evs, env, look) + renderGraphOverview(data, env) + block
 }
 
+// plannerParallelismBlock is host-controlled scheduler state. The overview's
+// intent lists are model input; this block turns the same counts into an exact
+// capacity target so a planner does not accidentally serialize unrelated work.
+// Idle slots are never a reason to duplicate a direction or violate a dependency.
+func plannerParallelismBlock(workerCapacity int, data map[string]any) string {
+	if workerCapacity <= 0 {
+		return ""
+	}
+	open := intValue(data["frontier_open"])
+	running := 0
+	if intents, ok := data["running_intents"].([]map[string]any); ok {
+		running = len(intents)
+	} else if intents, ok := data["running_intents"].([]any); ok {
+		running = len(intents)
+	}
+	active := open + running
+	available := max(workerCapacity-active, 0)
+	return fmt.Sprintf("\n\n[Host scheduler capacity — authoritative]: worker_capacity=%d, open_intents=%d, running_intents=%d, available_worker_slots=%d. When available_worker_slots > 0, use one add_intent batch to fill as many slots as there are genuinely distinct, in-scope, prerequisite-ready directions (up to the normal per-round cap). Do not leave capacity idle merely because one route is already running. Never invent padding, duplicate existing work, split one dependent chain, or dispatch a step before its evidence prerequisites just to fill a slot. If fewer independent directions exist, dispatch only those and explicitly state which dependency or scope constraint keeps the remaining slots idle.", workerCapacity, open, running, available)
+}
+
+func intValue(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int32:
+		return int(n)
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
 // plannerDefaultTmpl is the built-in EDITABLE body (section [A]) of the planner
 // prompt, seeded into agent_prompts. Goal is a {{.Goal}} template var; the
 // intermediate artifact output rules tail is code-owned (artifactSpec) and appended
@@ -526,6 +575,7 @@ Task goal: {{.Goal}}
 
 **How many intents should this round produce (think this through first)**:
 - **Hard floor (top priority)**: as long as [the goal is unmet] AND [there are currently no open or running intents] (frontier_open=0 and running_intents is empty), this round [must] produce at least one intent advancing toward the goal — with no running work to wait for and no queued direction, producing 0 intents = the task stalls; even if every known direction appears only in recent_done, open a new one or re-dispatch one per the done/exhausted/blocked judgment below.
+- **Keep independent workers occupied**: the user message includes authoritative worker_capacity and available_worker_slots. When slots are available, batch-dispatch distinct, in-scope, prerequisite-ready directions until those slots are filled (within the per-round cap). A running route does not justify serializing unrelated routes. It is correct to leave a slot idle only when there is no non-duplicate independent direction, a prerequisite is missing, or scope/operation constraints prohibit the remaining work; state that reason explicitly.
 - Beyond the hard floor, **producing 0 intents is a normal outcome, but it needs a legitimate reason** (not "fewer is safer" as a default): ①**Already covered** — every direction you can think of is already handled by intents still open/running (re-emitting an existing intent in different wording is a serious error); ②**Waiting on a dependency** — the next step depends on the output of currently running work that isn't out yet (dispatching now would leave the downstream spinning without its prerequisite; wait for the next wake after the graph updates).
 - Conversely: when there IS a genuinely [uncovered, and not dependent on running work] new direction, or the goal is unmet and untested surfaces remain in scope, dispatch it — don't make 0 intents the lazy default.
 
@@ -632,7 +682,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// risk). situational is spliced into input below.
 	// One envelope (one fresh nonce) per user message (#124, F3).
 	env := newDataEnvelope()
-	situational := plannerSituational(triggers, storeTriggerLookup(ts), tsx.graphOverviewData(), env)
+	overview := tsx.graphOverviewData()
+	situational := plannerSituational(triggers, storeTriggerLookup(ts), overview, env)
+	situational += plannerParallelismBlock(p.workerCapacity(), overview)
 	// Task-level deadline / endgame mode (injected via ctx, see taskclock.go). On the
 	// endgame round, the task-timeout planner wrap-up prompt is spliced into this
 	// round's user input (along with situational) as [this round's operating

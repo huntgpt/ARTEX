@@ -1025,7 +1025,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                     </Badge>
                   </div>
                   <div className="mt-1 text-muted-foreground text-xs">
-                    {phase.execution.replaceAll("_", " ")} · {(phase.tool || phase.tools.join(", ")) ?? "—"}
+                    {phase.execution.replaceAll("_", " ")} · {phase.tool || (phase.tools ?? []).join(", ") || "—"}
                   </div>
                   {phase.owner ? (
                     <div className="mt-1 text-xs">
@@ -1040,9 +1040,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       {t("Blocked reason")}: {phase.blocker_reason}
                     </p>
                   ) : null}
-                  {phase.dependencies.length > 0 ? (
+                  {(phase.dependencies ?? []).length > 0 ? (
                     <p className="mt-1 truncate text-muted-foreground text-[11px]">
-                      {t("Depends on")}: {phase.dependencies.join(", ")}
+                      {t("Depends on")}: {(phase.dependencies ?? []).join(", ")}
                     </p>
                   ) : null}
                 </div>
