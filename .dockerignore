@@ -7,7 +7,17 @@ server/webui/dist
 data
 keys
 backups
+# Engagement/runtime directories use suffixed names (for example
+# data-range-poc and keys-range-poc). They can contain customer evidence,
+# credentials and database backups and must never enter BuildKit's context.
+/data-*
+/keys-*
+/backups-*
+# No environment file belongs in a build context: production operators commonly
+# use names such as .env.production, which otherwise enter BuildKit's source layer.
 .env
+.env.*
+!.env.example
 config.json
 jwt.key
 *.db

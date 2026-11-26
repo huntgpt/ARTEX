@@ -1,0 +1,155 @@
+# Hardened Linux/container deployment. This file is intentionally separate from
+# docker-compose.yml: local development keeps its convenient bind mounts, while a
+# customer deployment gets an immutable root filesystem and a fail-closed executor
+# identity boundary.
+name: ${ARTEX_PRODUCTION_PROJECT:-artex-production}
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-artex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the production env file}
+      POSTGRES_DB: ${POSTGRES_DB:-artex}
+      # The ARTEX startup isolation probe must be refused when it tries the real
+      # database endpoint without the server-only password.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - control
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The image entrypoint starts as root only to initialise the named volume and
+    # drop to postgres. It has no network/admin/ptrace capability.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777,size=64m
+      - /var/run/postgresql:rw,nosuid,nodev,noexec,mode=3775,size=16m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-artex} -d ${POSTGRES_DB:-artex}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    pids_limit: 256
+    restart: unless-stopped
+
+  artex:
+    build:
+      context: .
+      args:
+        ARTEX_VERSION: ${ARTEX_VERSION:-production-local}
+    image: ${ARTEX_PRODUCTION_IMAGE:-artex:production-local}
+    # The control plane intentionally remains root. Agent-created processes are
+    # dropped to 10001:10001. If someone changes this service to a non-root user,
+    # the explicit flags below make startup fail instead of silently degrading.
+    user: "0:0"
+    command:
+      - -addr
+      - :8787
+      - -proxy
+      - :8788
+      - -data
+      - /app/data
+      - -exec-uid
+      - "10001"
+      - -exec-gid
+      - "10001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ARTEX_PG_HOST: postgres
+      ARTEX_PG_PORT: "5432"
+      ARTEX_PG_USER: ${POSTGRES_USER:-artex}
+      ARTEX_PG_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the production env file}
+      ARTEX_PG_DBNAME: ${POSTGRES_DB:-artex}
+      ARTEX_PG_SSLMODE: disable
+      ARTEX_JWT_KEY_DIR: /app/keys
+      ARTEX_SECRET_KEY: ${ARTEX_SECRET_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ARTEX_LLM_PROVIDER: ${ARTEX_LLM_PROVIDER:-}
+      ARTEX_LLM_MODEL: ${ARTEX_LLM_MODEL:-}
+      ARTEX_LLM_BASE_URL: ${ARTEX_LLM_BASE_URL:-}
+      ARTEX_LLM_PROXY: ${ARTEX_LLM_PROXY:-}
+      ARTEX_LLM_PRIVATE_ENDPOINTS: ${ARTEX_LLM_PRIVATE_ENDPOINTS:-}
+      ARTEX_TRUSTED_PROXIES: ${ARTEX_TRUSTED_PROXIES:-}
+      # Production invariants, not environment-file toggles.
+      ARTEX_UNTRUSTED_BOUNDARY: "1"
+      ARTEX_UPDATE_CHECK: "0"
+      ARTEX_NOISE_PROFILE: ${ARTEX_NOISE_PROFILE:-}
+      ARTEX_TARGET_USER_AGENT: ${ARTEX_TARGET_USER_AGENT:-}
+      ARTEX_TASK_BUDGET_TOKENS: ${ARTEX_TASK_BUDGET_TOKENS:-}
+      ARTEX_TASK_BUDGET_TURNS: ${ARTEX_TASK_BUDGET_TURNS:-}
+      ARTEX_INTENT_BUDGET_TOKENS: ${ARTEX_INTENT_BUDGET_TOKENS:-}
+      ARTEX_INTENT_BUDGET_TURNS: ${ARTEX_INTENT_BUDGET_TURNS:-}
+    ports:
+      - "${ARTEX_BIND_ADDR:-127.0.0.1}:${ARTEX_UI_PORT:-8787}:8787"
+      # The traffic proxy is loopback-only. Put authentication and TLS in a
+      # reviewed reverse proxy before exposing either listener remotely.
+      - "127.0.0.1:${ARTEX_PROXY_PORT:-8788}:8788"
+    volumes:
+      # Named volumes avoid exposing the source checkout or an operator home to an
+      # injected command. Built-in skills stay immutable in the image.
+      - artex_data:/app/data
+      - artex_keys:/app/keys
+    networks:
+      - control
+      - egress
+    read_only: true
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Required by ARTEX's root control-plane/unprivileged-executor design:
+    # ownership/layout setup, credential drop, control of dropped child processes,
+    # and access to executor-owned run artifacts. No SYS_ADMIN, NET_ADMIN,
+    # SYS_PTRACE, mount, module, or raw-socket capability is present.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - SETGID
+      - SETUID
+    tmpfs:
+      # Scanners and browser tooling execute temporary files, so /tmp cannot be
+      # noexec. It is bounded and never persists evidence; evidence belongs in data.
+      - /tmp:rw,exec,nosuid,nodev,mode=1777,size=2g
+      - /run:rw,nosuid,nodev,noexec,mode=755,size=16m
+    healthcheck:
+      # This is liveness/readiness only. The authenticated health response exposes
+      # isolation state, so verify-production-isolation.py checks the fail-closed
+      # startup result and a fresh executor probe instead.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    pids_limit: 2048
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  artex_data:
+  artex_keys:
+
+networks:
+  # PostgreSQL has no host port and no route through the egress network.
+  control:
+    internal: true
+  # Red-team tooling needs target egress. Docker isolation cannot enforce a client
+  # scope list by itself; production operators must enforce it upstream.
+  egress:

@@ -337,6 +337,14 @@ first-run claim), or keep loopback and use a reverse proxy or SSH tunnel.
 
 ### Option 2: Docker (Compose checkout build or prebuilt GHCR image)
 
+For a customer environment, use the hardened, fail-closed
+[`docker-compose.production.yml`](docker-compose.production.yml) profile and run
+[`scripts/verify-production-isolation.py`](scripts/verify-production-isolation.py)
+before admitting targets or credentials. It keeps agent processes under a separate
+unprivileged UID and avoids development bind mounts; see
+[`docs/production-container-deployment.md`](docs/production-container-deployment.md).
+The commands below remain the convenient local/development path.
+
 Build from a checkout with Docker Compose:
 
 ```bash

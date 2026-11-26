@@ -223,31 +223,63 @@ RUN set -eux; \
 
 # bbot recursive recon orchestrator (#117): blacklanternsecurity/bbot, AGPL-3.0
 # (same license as ARTEX; standalone CLI dependency, not linked code). Pinned
-# version, own venv to isolate from the image python. Module dependencies are
-# preinstalled (--install-all-deps) so scans never need pip at runtime, which
-# would fail under a program's egress allowlist.
+# version, own venv to isolate from the image python. Reviewed module
+# dependencies are baked below so scans never need pip or a privileged package
+# installer at runtime.
 ARG BBOT_VERSION=3.0.2
-# arm64: bbot's Chrome and retirejs's Node are x86-64; use native builds.
+# BBOT's all-module installer is intentionally not used here.  A release contains
+# modules for many unrelated platforms and some of their installers are x86-only;
+# `--install-all-deps` therefore makes a deterministic arm64 image impossible and
+# also downloads tools ARTEX never selected.  Bake the reviewed dependency set in
+# an immutable home instead.  bbot-wrapper.sh exposes it to the dropped executor
+# while keeping scan output in that executor's writable HOME.
+ARG GOWITNESS_VERSION=3.1.1
+ARG GOWITNESS_SHA256_AMD64=57b3188e24782c27fdf72493ce599537efd3187d03b80f8afe733c72d68c5517
+ARG GOWITNESS_SHA256_ARM64=a24284b4df4ea94a34edc55232b5d102555dcd01c73b1eb950ac4e304f753784
 RUN set -eux; \
     python -m venv /opt/bbot; \
     /opt/bbot/bin/pip install --no-cache-dir "bbot==${BBOT_VERSION}"; \
-    ln -s /opt/bbot/bin/bbot /usr/local/bin/bbot; \
-    if [ "${TARGETARCH:-amd64}" = "arm64" ]; then \
-      apt-get update; \
-      apt-get install -y --no-install-recommends chromium; \
-      rm -rf /var/lib/apt/lists/*; \
-      bbot_dir="$(/opt/bbot/bin/python -c 'import bbot, os; print(os.path.dirname(bbot.__file__))')"; \
-      sed -i 's/linux-x64/linux-arm64/g' "$bbot_dir/modules/retirejs.py"; \
-    fi; \
-    bbot -y --install-all-deps; \
-    if [ "${TARGETARCH:-amd64}" = "arm64" ]; then \
-      printf '\nmodules:\n  gowitness:\n    chrome_path: /usr/bin/chromium\n' >> /root/.config/bbot/bbot.yml; \
-    fi; \
-    bbot --version >/dev/null; \
-    bbot --dry-run -t example.com -m wafw00f,paramminer_getparams,lightfuzz,sslcert,gowitness,retirejs >/dev/null 2>&1 || true; \
-    bbot --dry-run -t example.com -m wafw00f,paramminer_getparams,lightfuzz,sslcert,gowitness,retirejs --no-color >/tmp/bbot-dry.log 2>&1 || true; \
-    ! grep -qE "Installing|ERRR|CRITICAL" /tmp/bbot-dry.log || { cat /tmp/bbot-dry.log; exit 1; }
-
+    /opt/bbot/bin/pip install --no-cache-dir "aiosqlite" "wafw00f~=2.3.1"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends chromium; \
+    rm -rf /var/lib/apt/lists/*; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) GOWITNESS_ARCH=amd64; want="$GOWITNESS_SHA256_AMD64" ;; \
+      arm64) GOWITNESS_ARCH=arm64; want="$GOWITNESS_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    install -d -m 0755 /opt/bbot-home/tools; \
+    asset="gowitness-${GOWITNESS_VERSION}-linux-${GOWITNESS_ARCH}"; \
+    curl -fsSL --retry 3 \
+      "https://github.com/sensepost/gowitness/releases/download/${GOWITNESS_VERSION}/${asset}" \
+      -o /opt/bbot-home/tools/gowitness; \
+    got="$(sha256sum /opt/bbot-home/tools/gowitness | cut -d' ' -f1)"; \
+    if [ "$want" != "$got" ]; then echo "checksum mismatch for $asset: want $want got $got" >&2; exit 1; fi; \
+    chmod 0755 /opt/bbot-home/tools/gowitness; \
+    ln -s /usr/local /opt/bbot-home/tools/node; \
+    npm install --prefix /opt/bbot-home/tools/retirejs \
+      --no-fund --no-audit --omit=optional "retire@5.3.0"
+# BBOT 3.0.2 calls its core-dependency installer before honoring
+# deps.behavior=disable.  Install that small, audited OS set during the bake so
+# an executor never needs sudo or a package manager at scan time.  Keep this in
+# its own layer so changes to the acceptance gate do not re-download BBOT,
+# Chromium, Gowitness, or RetireJS.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gcc libssl-dev make openssl p7zip-full; \
+    rm -rf /var/lib/apt/lists/*; \
+    command -v 7z; \
+    command -v gcc; \
+    command -v make; \
+    test -f /usr/include/openssl/ssl.h
+RUN set -eux; \
+    /opt/bbot/bin/bbot --version >/dev/null; \
+    /opt/bbot/bin/bbot --no-deps --dry-run -t example.com \
+      -c home=/opt/bbot-home interactsh_disable=true modules.gowitness.chrome_path=/usr/bin/chromium \
+      -m wafw00f,paramminer_getparams,lightfuzz,sslcert,gowitness,retirejs \
+      --no-color >/tmp/bbot-dry.log 2>&1 || true; \
+    grep -Fq "Setup succeeded for 19/19 modules." /tmp/bbot-dry.log; \
+    ! grep -qE "\[ERRR\]|\[CRITICAL\]|Setup failed" /tmp/bbot-dry.log || { cat /tmp/bbot-dry.log; exit 1; }
 # OpenDoor directory discovery is isolated in its own venv. Every PyPI wheel and
 # dependency is version- and hash-pinned so rebuilding the image cannot silently
 # pick up different scanner code.
@@ -292,6 +324,8 @@ RUN npm install -g "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" "@playwright/cli@
 # directory (server/execpriv_unix.go); the browsers installed above stay in root's
 # cache, which /root's 0711 lets the executor reach.
 ENV PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+COPY scripts/bbot-wrapper.sh /usr/local/bin/bbot
+RUN chmod 0755 /usr/local/bin/bbot
 WORKDIR /app
 # Binary compiled from source in the build stage above.
 COPY --from=build /out/artex /app/artex
