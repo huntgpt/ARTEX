@@ -606,6 +606,25 @@ export interface Finding {
   ts: string;
 }
 
+export interface FindingEvidenceArtifact {
+  id: string;
+  activity_id: number;
+  node_id?: number;
+  kind: "terminal_capture" | "browser_screenshot" | string;
+  label: string;
+  mime_type: "image/png" | "image/jpeg" | "image/webp" | string;
+  sha256: string;
+  byte_size: number;
+  captured_at: string;
+  tool?: string;
+  command?: string;
+  source_url?: string;
+  original_name?: string;
+  raw_output_sha256?: string;
+  truncated?: boolean;
+  sensitive?: boolean;
+}
+
 // FindingsPage is the server-side paginated response of the findings list.
 export interface FindingsPage {
   items: Finding[];

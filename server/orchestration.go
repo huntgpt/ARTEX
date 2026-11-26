@@ -777,7 +777,7 @@ func (s *Server) reseedMainAgentPrompt() {
 // settings flag guard → done only once. Fresh DBs need nothing (SeedPromptIfEmpty already seeds the latest default). Structurally identical to
 // reseedGoalsPrompt.
 func (s *Server) reseedPlannerPrompt() {
-	const flag = "planner_prompt_compact_realistic_v2"
+	const flag = "planner_prompt_compact_realistic_v3"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -798,7 +798,7 @@ func (s *Server) reseedPlannerPrompt() {
 		log.Printf("[prompts] failed to refresh planner prompt to the new default: %v", err)
 		return
 	}
-	log.Printf("[prompts] planner prompt: appended a new default version (slimmed rework + restraint demoted to dedup + depth-first + bounded negative re-checks, one-time)")
+	log.Printf("[prompts] planner prompt: appended a new default version (adds hash-verified terminal/browser evidence acceptance to intent planning, one-time)")
 }
 
 // reseedWorkerPrompt refreshes the worker prompt to [the current code default] — the record_fact section of the default body dropped the whole "for negative conclusions,

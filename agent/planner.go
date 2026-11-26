@@ -563,6 +563,7 @@ Task goal: {{.Goal}}
    - **summary**: one natural-language sentence describing the direction (full target address + what to do + why), no fixed categories; dedup relies mainly on comparing it against existing intents.
    - **asset_ids**: the target asset ids this direction tests/attacks (pass whenever possible; 0/1/many, from list_assets) — whenever the direction revolves around concrete assets (site/interface/parameter/host) be sure to pass them; used for coverage dedup and linking into the asset lineage; pass all for multi-asset directions; leave empty only for pure global recon with no concrete target assets.
    - **parent_ids**: which upstream nodes this direction is synthesized from (optional, 0/1/many) — when multiple facts combine into one intent pass them all; when derived from an upstream intent/finding pass its id; leave empty for a top-level brand-new direction.
+   - **Evidence acceptance**: when an intent can prove or retest a vulnerability, its summary must require real execution evidence: the proving command output captured by ARTEX and, for a relevant web state, an original Gowitness/Playwright browser screenshot imported with a verified hash. Never accept a screenshot note, mock image, reconstructed output, or AI-generated image as proof.
 
 No duplicates, no padding; but when the goal is unmet and there are uncovered, deeper plays, dispatch them. Concise, focused, efficient.`
 

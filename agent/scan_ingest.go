@@ -40,7 +40,14 @@ type scanIngest struct {
 	Assets                                     []assetInputItem
 	Facts                                      []factItem
 	Secrets                                    []db.DiscoveredSecretInput
+	BrowserScreenshots                         []browserScreenshotCandidate
 	Notable                                    map[string][]string
+}
+
+type browserScreenshotCandidate struct {
+	FileName   string
+	SourceURL  string
+	CapturedAt string
 }
 
 func newScanIngest() *scanIngest {
@@ -508,6 +515,9 @@ func (s *scanIngest) addGowitness(line []byte) {
 	}
 	s.Assets = append(s.Assets, asset)
 	s.note("screenshots", fmt.Sprintf("%s %d", final, r.ResponseCode))
+	s.BrowserScreenshots = append(s.BrowserScreenshots, browserScreenshotCandidate{
+		FileName: fileName, SourceURL: final, CapturedAt: r.ProbedAt,
+	})
 	s.fact(fmt.Sprintf("gowitness: screenshot captured for %s with status %d", final, r.ResponseCode), map[string]any{
 		"original_url": original, "final_url": final, "title": r.Title, "screenshot_file": fileName,
 		"content_length": r.ContentLength, "probed_at": r.ProbedAt, "protocol": r.Protocol,

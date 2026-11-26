@@ -2,13 +2,17 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	acperm "github.com/Autumn-27/norma/permission"
@@ -162,7 +166,8 @@ func (t *ToolSet) ingestScanOutput() actool.CoreTool {
 		Schema: obj(map[string]any{
 			"format": map[string]any{"type": "string", "enum": []string{"nmap-xml", "nuclei-jsonl", "httpx-jsonl", "gowitness-jsonl", "ffuf-json", "trufflehog-jsonl", "opendoor-json"},
 				"description": "scanner output format"},
-			"path": str("path of the output file, relative to your working directory"),
+			"path":           str("path of the output file, relative to your working directory"),
+			"screenshot_dir": map[string]any{"type": "string", "description": "for gowitness-jsonl: directory containing the real image files; defaults to an images directory beside the JSONL file"},
 		}, "format", "path"),
 		Permissions: func(context.Context, json.RawMessage, acperm.Context) acperm.Decision { return acperm.Allowed() },
 		Run: func(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
@@ -178,8 +183,9 @@ func (t *ToolSet) runScanIngest(ctx context.Context, in json.RawMessage, tc *act
 		return actool.Errorf("ingest_scan_output is not enabled: AssetStore is not initialized"), nil
 	}
 	var a struct {
-		Format string `json:"format"`
-		Path   string `json:"path"`
+		Format        string `json:"format"`
+		Path          string `json:"path"`
+		ScreenshotDir string `json:"screenshot_dir"`
 	}
 	if err := json.Unmarshal(in, &a); err != nil {
 		return actool.Errorf("invalid input: " + err.Error()), nil
@@ -206,6 +212,19 @@ func (t *ToolSet) runScanIngest(ctx context.Context, in json.RawMessage, tc *act
 	out := map[string]any{
 		"format": a.Format, "hosts": len(s.hosts), "ports": s.Ports, "urls": len(s.urls), "events": s.Events,
 		"skipped": s.Skipped, "oversized_lines": s.Oversized, "over_cap": s.OverCap, "truncated": s.Truncated, "notable": s.Notable,
+	}
+	if a.Format == "gowitness-jsonl" && len(s.BrowserScreenshots) > 0 {
+		dir := strings.TrimSpace(a.ScreenshotDir)
+		if dir == "" {
+			dir = filepath.Join(filepath.Dir(a.Path), "images")
+		}
+		artifacts, importErrs := t.importBrowserScreenshots(root, dir, s.BrowserScreenshots)
+		if len(artifacts) > 0 {
+			out["artifacts"] = artifacts
+		}
+		if len(importErrs) > 0 {
+			out["artifact_errors"] = importErrs
+		}
 	}
 	if len(s.Assets) > 0 {
 		raw, _ := json.Marshal(map[string]any{"assets": s.Assets})
@@ -258,6 +277,88 @@ func (t *ToolSet) runScanIngest(ctx context.Context, in json.RawMessage, tc *act
 		out["fact_errors"] = errs
 	}
 	return jsonResult(out)
+}
+
+const maxBrowserEvidenceBytes = 25 << 20
+
+// importBrowserScreenshots copies unmodified Gowitness images into the
+// server-owned evidence area. The copy is accepted only when its bytes have a
+// supported image signature; the returned SHA-256 identifies the exact original.
+func (t *ToolSet) importBrowserScreenshots(workingDir, screenshotDir string, candidates []browserScreenshotCandidate) ([]EvidenceArtifact, []string) {
+	if t.taskID <= 0 || strings.TrimSpace(t.workBase) == "" {
+		return nil, []string{"browser evidence import requires task context"}
+	}
+	cfg := taskEvidenceConfig(t.workBase, t.taskID)
+	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
+		return nil, []string{"browser evidence directory could not be created"}
+	}
+	artifacts := make([]EvidenceArtifact, 0, len(candidates))
+	errs := []string{}
+	for _, candidate := range candidates {
+		if len(errs) >= scanNotableMax {
+			break
+		}
+		source := filepath.Join(screenshotDir, candidate.FileName)
+		f, err := openScanOutputInBase(t.workBase, workingDir, source)
+		if err != nil {
+			errs = append(errs, candidate.FileName+": file unavailable")
+			continue
+		}
+		limited := io.LimitReader(f, maxBrowserEvidenceBytes+1)
+		data, readErr := io.ReadAll(limited)
+		f.Close()
+		if readErr != nil || len(data) == 0 || len(data) > maxBrowserEvidenceBytes {
+			errs = append(errs, candidate.FileName+": invalid image size")
+			continue
+		}
+		mime := http.DetectContentType(data[:min(len(data), 512)])
+		ext := ""
+		switch mime {
+		case "image/png":
+			ext = ".png"
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/webp":
+			ext = ".webp"
+		default:
+			errs = append(errs, candidate.FileName+": unsupported image content")
+			continue
+		}
+		hash := sha256.Sum256(data)
+		hashText := hex.EncodeToString(hash[:])
+		name := "browser-" + hashText[:20] + ext
+		dest := filepath.Join(cfg.Dir, name)
+		if existing, statErr := os.Stat(dest); statErr == nil {
+			if !existing.Mode().IsRegular() {
+				errs = append(errs, candidate.FileName+": evidence destination is not a regular file")
+				continue
+			}
+		} else if !os.IsNotExist(statErr) {
+			errs = append(errs, candidate.FileName+": evidence destination unavailable")
+			continue
+		} else if writeErr := os.WriteFile(dest, data, 0o600); writeErr != nil {
+			errs = append(errs, candidate.FileName+": evidence copy failed")
+			continue
+		}
+		capturedAt, parseErr := time.Parse(time.RFC3339, candidate.CapturedAt)
+		if parseErr != nil {
+			capturedAt = time.Now().UTC()
+		}
+		artifacts = append(artifacts, EvidenceArtifact{
+			Ref:          filepath.ToSlash(filepath.Join(cfg.RefPrefix, name)),
+			Kind:         "browser_screenshot",
+			Label:        "Actual browser screenshot",
+			MIMEType:     mime,
+			SHA256:       hashText,
+			ByteSize:     int64(len(data)),
+			CapturedAt:   capturedAt.UTC(),
+			Tool:         "gowitness",
+			SourceURL:    candidate.SourceURL,
+			OriginalName: candidate.FileName,
+			Sensitive:    true,
+		})
+	}
+	return artifacts, errs
 }
 
 // recordScanFacts writes the facts this exploration does not hold yet: one with

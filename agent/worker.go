@@ -323,6 +323,18 @@ func workerArtifactSpec(runDir string) string {
 	return "\n\n**Intermediate artifact output rules**: all intermediate artifacts — scripts, payloads, captured response bodies, temporary data — **must be written to this intent's dedicated work directory " + runDir + "** (already created automatically; just write with relative paths there — no manual mkdir needed) — **do NOT write to /tmp, do NOT use other absolute paths**."
 }
 
+// workerEvidenceSpec is code-owned so an editable DB prompt cannot weaken the
+// requirement that client-facing proof comes from real executions and browsers.
+func workerEvidenceSpec() string {
+	return `
+
+**Verified image evidence (mandatory for findings)**:
+- ARTEX automatically renders every Bash/shell tool result from the exact audited command output into a hash-identified terminal PNG. Do not create a fake terminal image, mock output, reconstructed screenshot, or AI-generated evidence.
+- When a web page or browser state supports a fact/finding, capture it with a real browser (Gowitness or Playwright/Chromium). For Gowitness, call ingest_scan_output(format="gowitness-jsonl", path=..., screenshot_dir=...) so ARTEX imports the original image bytes and verifies their SHA-256. A filename or a screenshot note alone is not evidence.
+- Before report_finding, make sure the proving command ran in this intent and every relevant web state has a successfully imported artifact. Cite the command/URL in the textual evidence too; the image supplements reproducibility and never replaces it.
+- Internal evidence may contain sensitive values. Preserve the exact original internally; do not paste secrets into summaries or model prose, and rely on the report/export redaction layer for customer-facing copies.`
+}
+
 // mainRunDirName is the run directory of a task's main agent and planner.
 const mainRunDirName = "main"
 
@@ -420,7 +432,7 @@ func workerSystemParts(proxyAddr, caCert, dataDir, runDir string) (staticPart, d
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	staticPart = body + untrustedContentTail(body) + workerTrafficBlock(caCert != "")
+	staticPart = body + untrustedContentTail(body) + workerTrafficBlock(caCert != "") + workerEvidenceSpec()
 	dynamicHead = workerArtifactSpec(runDir) + noiseProfileBlock()
 	return staticPart, dynamicHead
 }
@@ -748,6 +760,6 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// enters the wrap-up phase on the live ctx, so a run whose tool overran the budget
 	// still settles (no external hard-timeout backstop needed). ctx itself carries only
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
-	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
+	_, reason, err := captureRunSessionWithEvidence(ctx, s, input, taskEvidenceConfig(w.workDir, taskID), emitWrap)
 	return reason, tsx.Writes(), err
 }

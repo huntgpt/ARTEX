@@ -9,6 +9,7 @@ import { ArrowLeftIcon, ArrowUpRightIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingEvidenceArtifacts } from "@/components/finding-evidence-artifacts";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
 import { Markdown } from "@/components/markdown";
@@ -21,10 +22,10 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { intlLocale, t } from "@/i18n";
 import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import type { Finding, FindingReportState, FindingStatus, Severity } from "@/lib/types";
-import { intlLocale, t } from "@/i18n";
 
 import {
   FINDING_REPORT_STATES,
@@ -199,6 +200,7 @@ function FindingDetailInner() {
                 </CardContent>
               </Card>
               <FindingRetestPanel key={id} findingId={id} readOnly={finding.inherited} onCompleted={load} />
+              <FindingEvidenceArtifacts key={`visual-${id}`} findingId={id} />
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">{t("Evidence / PoC")}</CardTitle>

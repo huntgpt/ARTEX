@@ -40,6 +40,7 @@ import type {
   Finding,
   FindingAssetTree,
   FindingDeepenResponse,
+  FindingEvidenceArtifact,
   FindingGroupsPage,
   FindingQuery,
   FindingReportState,
@@ -672,6 +673,25 @@ export const api = {
     get<Finding>(
       `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,
     ),
+  findingArtifacts: (id: string) => get<{ items: FindingEvidenceArtifact[] }>(`/exploration/findings/${id}/artifacts`),
+  findingArtifactBlob: async (id: string, artifactId: string) => {
+    if (MOCK) throw new Error(t("Evidence images are not available in mock mode"));
+    const token = getToken();
+    const response = await fetch(`/api/exploration/findings/${id}/artifacts/${encodeURIComponent(artifactId)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!response.ok) {
+      let message = t("Evidence image could not be loaded");
+      try {
+        const payload = (await response.json()) as { error?: string };
+        if (payload.error) message = payload.error;
+      } catch {
+        // Preserve the non-JSON fallback.
+      }
+      throw new ApiError(message, response.status);
+    }
+    return response.blob();
+  },
   findingTraffic: (id: string, contextTask?: string) =>
     get<FindingTraffic>(
       `/exploration/findings/${id}/traffic${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,

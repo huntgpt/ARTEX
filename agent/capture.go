@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -35,6 +36,13 @@ func captureRun(ctx context.Context, opts agentcore.Options, input string, emit 
 // multiple prompts on the SAME conversation (e.g. a settlement round that reuses
 // the worker's accumulated context after the main run hit max_turns).
 func captureRunSession(ctx context.Context, s *agentcore.Session, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
+	return captureRunSessionWithEvidence(ctx, s, input, evidenceCaptureConfig{}, emit)
+}
+
+// captureRunSessionWithEvidence adds cryptographically identified image
+// artifacts to tool_result activity metadata. It is enabled for task workers;
+// the plain wrapper keeps planner/goals/chat behavior unchanged.
+func captureRunSessionWithEvidence(ctx context.Context, s *agentcore.Session, input string, evidence evidenceCaptureConfig, emit func(db.Activity)) (string, harness.TerminalReason, error) {
 	ctx, auditTrace := intercept.WithTrace(ctx, input, approvalHistory(s.Messages()))
 	defer auditTrace.Finish()
 	// Observe each model call's stop reason, so a provider refusal is reported as
@@ -49,7 +57,8 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			emit(r)
 		}
 	}
-	toolNames := map[string]string{} // tool_use id -> name, to label results
+	toolNames := map[string]string{}  // tool_use id -> name, to label results
+	toolInputs := map[string]string{} // tool_use id -> exact JSON input, for evidence provenance
 
 	var tbuf strings.Builder
 	var tkind string
@@ -99,6 +108,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			flush()
 			toolNames[ev.ToolUse.ID] = ev.ToolUse.Name
 			in := string(ev.ToolUse.Input)
+			toolInputs[ev.ToolUse.ID] = in
 			lastTool.start(ev.ToolUse.ID, ev.ToolUse.Name, in)
 			auditTrace.Start(ev.ToolUse.ID, ev.ToolUse.Name, ev.ToolUse.Input)
 			rec(db.Activity{Kind: "tool_use", Tool: ev.ToolUse.Name, ToolUseID: ev.ToolUse.ID,
@@ -111,8 +121,17 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			out := blocksText(ev.ToolResult.Content)
 			lastTool.done(ev.ToolResult.ToolUseID)
 			auditTrace.Complete(ev.ToolResult.ToolUseID, out, ev.ToolResult.IsError)
-			rec(db.Activity{Kind: "tool_result", Tool: toolNames[ev.ToolResult.ToolUseID], ToolUseID: ev.ToolResult.ToolUseID,
-				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out})
+			toolName := toolNames[ev.ToolResult.ToolUseID]
+			artifacts := artifactsFromToolResult(out)
+			if generated, genErr := terminalEvidence(evidence, ev.ToolResult.ToolUseID, toolName,
+				toolInputs[ev.ToolResult.ToolUseID], out, time.Now()); genErr != nil {
+				log.Printf("[evidence] terminal capture for %s: %v", ev.ToolResult.ToolUseID, genErr)
+			} else {
+				artifacts = append(artifacts, generated...)
+			}
+			rec(db.Activity{Kind: "tool_result", Tool: toolName, ToolUseID: ev.ToolResult.ToolUseID,
+				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out,
+				Metadata: evidenceMetadata(nil, artifacts)})
 		case harness.KindText:
 			addDelta("text", ev.Text)
 		case harness.KindThinking:

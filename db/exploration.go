@@ -1488,6 +1488,33 @@ func (s *ExplorationStore) AppendActivity(a Activity) (int64, error) {
 	return s.appendActivity(s.db, a)
 }
 
+// EvidenceActivities returns only activity rows on the supplied lineage nodes
+// that declare verified evidence artifacts in metadata. Detail is intentionally
+// omitted: the image list endpoint must not duplicate raw command output.
+func (s *ExplorationStore) EvidenceActivities(nodeIDs []int64) ([]Activity, error) {
+	if len(nodeIDs) == 0 {
+		return []Activity{}, nil
+	}
+	rows, err := s.db.Query(`
+SELECT id,node_id,COALESCE(worker,''),COALESCE(kind,''),COALESCE(tool,''),COALESCE(tool_use_id,''),is_error,COALESCE(summary,''),metadata,created_at
+FROM activity
+WHERE exploration_id=$1 AND node_id=ANY($2::bigint[]) AND metadata ? 'evidence_artifacts'
+ORDER BY created_at,id`, s.expID, nodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Activity{}
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.Metadata, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *ExplorationStore) appendActivity(q queryRower, a Activity) (int64, error) {
 	metadata := a.Metadata
 	if len(metadata) == 0 {
