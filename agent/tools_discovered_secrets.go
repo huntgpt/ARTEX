@@ -9,11 +9,14 @@ import (
 
 // listDiscoveredSecrets gives agents enough non-plaintext evidence to verify a
 // scanner import without ever revealing a secret. Plaintext access remains an
-// explicit audited operator action through the server reveal endpoint.
+// explicit audited operator action through the server reveal endpoint. Scanner
+// verification and source exposure are deliberately separate: verified=false
+// means only that the detector did not establish live credential validity. It
+// never means that a raw value was absent from the scanned source.
 func (t *ToolSet) listDiscoveredSecrets() actool.CoreTool {
 	return readTool(
 		"list_discovered_secrets",
-		"List this task's discovered-secret metadata without plaintext. Returns detector, source/location, commit, verification state, SHA-256 and booleans proving that encrypted Raw/RawV2 values are present. Use this to reconcile TruffleHog ingestion; use no other tool to retrieve plaintext.",
+		"List this task's discovered-secret evidence without plaintext. Returns detector, source/location, commit, a report-safe masked preview, SHA-256 and booleans proving that encrypted Raw/RawV2 values are present. IMPORTANT: verified is only the scanner's live-credential validation result. verified=false does not negate public-source exposure and must not suppress a finding once contextual review confirms that non-example secret material is present in a public in-scope source. Keep source_exposure_status and credential_validity_status separate. Use no other tool to retrieve plaintext.",
 		obj(map[string]any{}),
 		func(_ context.Context, _ json.RawMessage) (actool.Result, error) {
 			if t.ts == nil {
@@ -34,6 +37,14 @@ func (t *ToolSet) listDiscoveredSecrets() actool.CoreTool {
 			}
 			out := make([]map[string]any, 0, len(items))
 			for _, item := range items {
+				validity := "not_tested_or_not_verified"
+				if item.Verified {
+					validity = "scanner_verified"
+				}
+				exposure := "metadata_only"
+				if item.EncryptedValuePresent {
+					exposure = "raw_secret_material_encrypted_at_rest"
+				}
 				out = append(out, map[string]any{
 					"id": item.ID, "detector": item.Detector,
 					"source_type": item.SourceType, "source_name": item.SourceName,
@@ -42,6 +53,9 @@ func (t *ToolSet) listDiscoveredSecrets() actool.CoreTool {
 					"verified": item.Verified, "secret_sha256": item.SecretSHA256,
 					"encrypted_value_present":    item.EncryptedValuePresent,
 					"encrypted_value_v2_present": item.EncryptedValueV2Present,
+					"masked_preview":             item.ScannerRedacted,
+					"source_exposure_status":     exposure,
+					"credential_validity_status": validity,
 				})
 			}
 			return jsonResult(map[string]any{"count": len(out), "secrets": out})

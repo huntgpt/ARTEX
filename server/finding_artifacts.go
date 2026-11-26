@@ -8,18 +8,23 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
+	"github.com/Autumn-27/artex/db"
 )
 
 type findingArtifactDTO struct {
 	ID              string    `json:"id"`
 	ActivityID      int64     `json:"activity_id"`
 	NodeID          int64     `json:"node_id,omitempty"`
+	ToolUseID       string    `json:"tool_use_id"`
+	Verified        bool      `json:"verified"`
+	Provenance      string    `json:"provenance"`
 	Kind            string    `json:"kind"`
 	Label           string    `json:"label"`
 	MIMEType        string    `json:"mime_type"`
@@ -62,6 +67,7 @@ func (s *Server) findingArtifacts(id int64) ([]findingArtifactDTO, error) {
 	}
 	seen := map[string]bool{}
 	out := []findingArtifactDTO{}
+	evidenceRoot := filepath.Join(s.m.dir, "evidence")
 	for _, activity := range activities {
 		var metadata struct {
 			Artifacts []agent.EvidenceArtifact `json:"evidence_artifacts"`
@@ -70,7 +76,8 @@ func (s *Server) findingArtifacts(id int64) ([]findingArtifactDTO, error) {
 			continue
 		}
 		for _, artifact := range metadata.Artifacts {
-			if !validEvidenceArtifact(artifact) || seen[artifact.SHA256] {
+			if !validEvidenceArtifact(activity, artifact) ||
+				!evidenceArtifactFileValid(evidenceRoot, artifact) || seen[artifact.SHA256] {
 				continue
 			}
 			seen[artifact.SHA256] = true
@@ -80,6 +87,7 @@ func (s *Server) findingArtifacts(id int64) ([]findingArtifactDTO, error) {
 			}
 			out = append(out, findingArtifactDTO{
 				ID: artifact.SHA256, ActivityID: activity.ID, NodeID: nodeID,
+				ToolUseID: activity.ToolUseID, Verified: true, Provenance: "audited_tool_result",
 				Kind: artifact.Kind, Label: artifact.Label, MIMEType: artifact.MIMEType,
 				SHA256: artifact.SHA256, ByteSize: artifact.ByteSize, CapturedAt: artifact.CapturedAt,
 				Tool: artifact.Tool, Command: artifact.Command, SourceURL: artifact.SourceURL,
@@ -91,16 +99,98 @@ func (s *Server) findingArtifacts(id int64) ([]findingArtifactDTO, error) {
 	return out, nil
 }
 
-func validEvidenceArtifact(artifact agent.EvidenceArtifact) bool {
-	if len(artifact.SHA256) != 64 || len(artifact.Ref) == 0 || filepath.IsAbs(artifact.Ref) {
+func validEvidenceArtifact(activity db.Activity, artifact agent.EvidenceArtifact) bool {
+	if activity.Kind != "tool_result" || strings.TrimSpace(activity.ToolUseID) == "" ||
+		artifact.CapturedAt.IsZero() || artifact.ByteSize <= 0 || artifact.ByteSize > 50<<20 ||
+		len(artifact.SHA256) != 64 || strings.ToLower(artifact.SHA256) != artifact.SHA256 ||
+		len(artifact.Ref) == 0 || filepath.IsAbs(artifact.Ref) {
 		return false
 	}
 	if _, err := hex.DecodeString(artifact.SHA256); err != nil {
 		return false
 	}
 	clean := filepath.Clean(filepath.FromSlash(artifact.Ref))
-	return clean != "." && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator)) &&
-		(artifact.MIMEType == "image/png" || artifact.MIMEType == "image/jpeg" || artifact.MIMEType == "image/webp")
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) ||
+		!strings.HasPrefix(filepath.ToSlash(clean), "tasks/") {
+		return false
+	}
+	switch artifact.Kind {
+	case "terminal_capture":
+		if artifact.MIMEType != "image/png" || !shellEvidenceActivityTool(activity.Tool) ||
+			!strings.EqualFold(strings.TrimSpace(artifact.Tool), strings.TrimSpace(activity.Tool)) ||
+			strings.TrimSpace(artifact.Command) == "" || len(artifact.RawOutputSHA256) != 64 ||
+			strings.TrimSpace(artifact.SourceURL) != "" {
+			return false
+		}
+		if _, err := hex.DecodeString(artifact.RawOutputSHA256); err != nil {
+			return false
+		}
+		raw := sha256.Sum256([]byte(activity.Detail))
+		return hex.EncodeToString(raw[:]) == artifact.RawOutputSHA256
+	case "browser_screenshot":
+		if activity.Tool != "ingest_scan_output" || artifact.Tool != "gowitness" ||
+			artifact.RawOutputSHA256 != "" || artifact.Command != "" ||
+			artifact.OriginalName == "" || artifact.OriginalName != filepath.Base(artifact.OriginalName) {
+			return false
+		}
+		switch artifact.MIMEType {
+		case "image/png", "image/jpeg", "image/webp":
+		default:
+			return false
+		}
+		u, err := url.Parse(artifact.SourceURL)
+		if err != nil || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			return false
+		}
+		return artifactDeclaredInToolResult(activity.Detail, artifact)
+	default:
+		return false
+	}
+}
+
+func shellEvidenceActivityTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "bash", "shell", "exec", "execute", "exec_command", "run_command":
+		return true
+	default:
+		return false
+	}
+}
+
+func artifactDeclaredInToolResult(detail string, artifact agent.EvidenceArtifact) bool {
+	var envelope struct {
+		Artifacts []agent.EvidenceArtifact `json:"artifacts"`
+	}
+	if json.Unmarshal([]byte(detail), &envelope) != nil {
+		return false
+	}
+	for _, declared := range envelope.Artifacts {
+		if declared == artifact {
+			return true
+		}
+	}
+	return false
+}
+
+func evidenceArtifactFileValid(root string, artifact agent.EvidenceArtifact) bool {
+	path, err := confinedEvidencePath(root, artifact.Ref)
+	if err != nil {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() != artifact.ByteSize || st.Size() > 50<<20 {
+		return false
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return false
+	}
+	return hex.EncodeToString(h.Sum(nil)) == artifact.SHA256
 }
 
 func (s *Server) listFindingArtifacts(w http.ResponseWriter, r *http.Request) {

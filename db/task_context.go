@@ -64,6 +64,11 @@ func (d *DB) hydrateTaskContext(t *Task) error {
 	}
 	t.CompanyIDs = companies
 	applyTaskLLMContext(t, legacyProfileID, activeProfileID, revision, chain)
+	supervisor, err := d.TaskSupervisorConfig(t.ID)
+	if err != nil {
+		return err
+	}
+	t.Supervisor = supervisor
 	return nil
 }
 
@@ -115,11 +120,12 @@ type taskBatchContext struct {
 	chain           []TaskLLMProfile
 	sourceIDs       []int64
 	companyIDs      []int64
+	supervisor      TaskSupervisorConfig
 }
 
-// hydrateTasksContext loads every task's LLM chain, source tasks, and company
-// scopes with three bulk queries. ListTasks used to issue these queries once per
-// task, making startup and task-list hydration grow as 3N+1 database round trips.
+// hydrateTasksContext loads every task's LLM chain, supervisor topology, source
+// tasks, and company scopes with four bulk queries. ListTasks used to issue
+// context queries once per task, making startup grow linearly in round trips.
 func (d *DB) hydrateTasksContext(tasks []*Task) error {
 	if len(tasks) == 0 {
 		return nil
@@ -243,6 +249,40 @@ ORDER BY task_id, id`, ids)
 	}
 	rows.Close()
 
+	rows, err = d.Query(`
+SELECT task_id,mode,primary_profile_id,secondary_profile_id,checkpoint_policy,revision
+FROM task_supervisor_config
+WHERE task_id=ANY($1::bigint[])
+ORDER BY task_id`, ids)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var taskID int64
+		var primary, secondary sql.NullInt64
+		cfg := DefaultTaskSupervisorConfig()
+		if err := rows.Scan(&taskID, &cfg.Mode, &primary, &secondary, &cfg.CheckpointPolicy, &cfg.Revision); err != nil {
+			rows.Close()
+			return err
+		}
+		if primary.Valid {
+			id := primary.Int64
+			cfg.PrimaryProfileID = &id
+		}
+		if secondary.Valid {
+			id := secondary.Int64
+			cfg.SecondaryProfileID = &id
+		}
+		if context := contexts[taskID]; context != nil {
+			context.supervisor = cfg
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
 	for id, context := range contexts {
 		task := byID[id]
 		task.SourceTaskIDs = context.sourceIDs
@@ -254,6 +294,10 @@ ORDER BY task_id, id`, ids)
 			context.revision,
 			context.chain,
 		)
+		if context.supervisor.Mode == "" {
+			context.supervisor = DefaultTaskSupervisorConfig()
+		}
+		task.Supervisor = context.supervisor
 	}
 	return nil
 }

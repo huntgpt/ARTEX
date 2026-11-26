@@ -58,8 +58,15 @@ func TestEvidenceMetadataPreservesExistingKeys(t *testing.T) {
 	if got["provider"] != "codex" {
 		t.Fatalf("existing metadata lost: %s", metadata)
 	}
-	if artifactsFromToolResult(`{"artifacts":[{"ref":"tasks/1/x.png","kind":"browser_screenshot","mime_type":"image/png","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`)[0].Kind != "browser_screenshot" {
+	validBrowser := `{"artifacts":[{"ref":"tasks/1/x.png","kind":"browser_screenshot","mime_type":"image/png","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byte_size":42,"captured_at":"2026-11-26T10:00:00Z","tool":"gowitness","source_url":"https://target.example/","original_name":"target.png"}]}`
+	if artifacts := artifactsFromToolResult("ingest_scan_output", validBrowser); len(artifacts) != 1 || artifacts[0].Kind != "browser_screenshot" {
 		t.Fatal("tool-result artifacts were not parsed")
+	}
+	if artifacts := artifactsFromToolResult("Bash", validBrowser); len(artifacts) != 0 {
+		t.Fatal("arbitrary shell output was trusted as imported evidence")
+	}
+	if artifacts := artifactsFromToolResult("ingest_scan_output", `{"artifacts":[{"ref":"tasks/1/fake.png","kind":"terminal_capture","mime_type":"image/png","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byte_size":42,"captured_at":"2026-11-26T10:00:00Z","tool":"Bash","command":"echo fake"}]}`); len(artifacts) != 0 {
+		t.Fatal("imported tool output forged a terminal capture")
 	}
 }
 

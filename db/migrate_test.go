@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"io/fs"
 	"net/url"
 	"strings"
@@ -143,9 +144,10 @@ func assertEmbeddedApplied(t *testing.T, d *DB) []appliedMigration {
 		{13, "0013_lesson_evidence_history.sql"}, {14, "0014_bedrock_gateway_profiles.sql"},
 		{15, "0015_ad_exploration_graph.sql"}, {16, "0016_local_cli_profiles.sql"},
 		{17, "0017_ad_collection_runs.sql"}, {18, "0018_discovered_secrets.sql"}, {19, "0019_red_team_workflow.sql"}, {20, "0020_extended_ad_attack_paths.sql"},
-		{21, "0021_codex_cyber_access_program.sql"}, {22, "0022_claude_oauth_token_file.sql"}, {23, "0023_planner_todos.sql"}}
+		{21, "0021_codex_cyber_access_program.sql"}, {22, "0022_claude_oauth_token_file.sql"}, {23, "0023_planner_todos.sql"},
+		{24, "0024_dual_lead_supervision.sql"}, {25, "0025_supervisor_snapshot_security.sql"}}
 	if len(applied) != len(want) {
-		t.Fatalf("schema_migrations = %+v, want versions 1 to 23", applied)
+		t.Fatalf("schema_migrations = %+v, want versions 1 to 25", applied)
 	}
 	for i, w := range want {
 		content, err := fs.ReadFile(migrationsFS(), w.name)
@@ -510,5 +512,58 @@ func TestLessonWithdrawnMigrationKeepsExistingEvidence(t *testing.T) {
 		if !after[i].appliedAt.Equal(before[i].appliedAt) || after[i].checksum != before[i].checksum {
 			t.Errorf("second Open changed migration %04d: before %+v, after %+v", before[i].version, before[i], after[i])
 		}
+	}
+}
+
+func TestSupervisorSnapshotSecurityMigrationRedactsExistingRows(t *testing.T) {
+	dsn := scratchDSN(t, "supervisor_snapshot_security")
+	d, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	task, err := d.CreateTaskWithOptions("legacy supervisor", "password=legacy-plaintext", TaskCreateOptions{})
+	if err != nil {
+		d.Close()
+		t.Fatal(err)
+	}
+	profile, err := d.SaveProfile(&LLMProfile{Name: "legacy-supervisor-profile", Format: "codex-cli", Model: "codex-test", CLIPath: "/bin/true"})
+	if err != nil {
+		d.Close()
+		t.Fatal(err)
+	}
+	round, err := d.CreateSupervisorRound(task.ID, "legacy", map[string]any{"goal": "safe"}, []SupervisorReviewSeed{{
+		LeadRole: "primary", ProfileID: profile, Provider: "codex-cli", Model: "codex-test", AccountLabel: "legacy",
+	}})
+	if err != nil {
+		d.Close()
+		t.Fatal(err)
+	}
+	const legacyHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, query := range []string{
+		`UPDATE supervisor_rounds SET snapshot='{"goal":"password=legacy-plaintext"}'::jsonb,snapshot_hash='` + legacyHash + `' WHERE id=` + fmt.Sprint(round.ID),
+		`ALTER TABLE supervisor_rounds DROP COLUMN legacy_snapshot_hash`,
+		`DELETE FROM schema_migrations WHERE version=25`,
+	} {
+		if _, err := d.Exec(query); err != nil {
+			d.Close()
+			t.Fatalf("prepare legacy supervisor row: %v", err)
+		}
+	}
+	d.Close()
+
+	d, err = Open(dsn)
+	if err != nil {
+		t.Fatalf("Open pre-0025 database: %v", err)
+	}
+	defer d.Close()
+	var snapshot, hash, legacy string
+	if err := d.QueryRow(`SELECT snapshot::text,snapshot_hash,legacy_snapshot_hash FROM supervisor_rounds WHERE id=$1`, round.ID).Scan(&snapshot, &hash, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(snapshot, "legacy-plaintext") || snapshot != `{"legacy_snapshot_redacted": true}` {
+		t.Fatalf("legacy snapshot not safely replaced: %s", snapshot)
+	}
+	if hash != "e704b77163acea7bf8b4f599a79461d024629ea0f0ddc4c67431a1a4c87c18de" || legacy != legacyHash {
+		t.Fatalf("migrated hashes current=%s legacy=%s", hash, legacy)
 	}
 }

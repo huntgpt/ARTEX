@@ -103,6 +103,8 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		{`DELETE FROM task_relations WHERE task_id=$1 OR source_task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_asset_links WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_llm_profiles WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM supervisor_rounds WHERE task_id=$1`, []any{taskID}},
+		{`DELETE FROM task_supervisor_config WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_scope WHERE task_id=$1`, []any{taskID}},
 		{`DELETE FROM task_constraints WHERE exploration_id=$1`, []any{expID}},
 		{`DELETE FROM activity WHERE exploration_id=$1`, []any{expID}},
@@ -284,6 +286,16 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	} else {
 		warnings = append(warnings, warning...)
 	}
+	if warning, err := restoreTaskSupervision(tx,
+		remappedTables["task_supervisor_config"],
+		remappedTables["supervisor_rounds"],
+		remappedTables["supervisor_reviews"],
+		remappedTables["supervisor_decisions"],
+	); err != nil {
+		return nil, err
+	} else {
+		warnings = append(warnings, warning...)
+	}
 	for _, table := range []string{"task_asset_links", "findings"} {
 		if err := insertArchiveRows(tx, table, remappedTables[table]); err != nil {
 			return nil, fmt.Errorf("restore %s: %w", table, err)
@@ -421,6 +433,8 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 		"red_team_phase_runs": true,
 		"llm_records":         true, "llm_usage": true, "skill_usage": true, "tool_usage": true,
 		"side_question_sessions": true, "side_question_requests": true,
+		"task_supervisor_config": true, "supervisor_rounds": true,
+		"supervisor_reviews": true, "supervisor_decisions": true,
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)
@@ -702,6 +716,58 @@ func restoreTaskLLMProfiles(tx *sql.Tx, raw json.RawMessage) ([]string, error) {
 			return nil, err
 		}
 		position++
+	}
+	return warnings, nil
+}
+
+// restoreTaskSupervision preserves the immutable lead reviews and arbiter
+// decisions while tolerating LLM profiles that were removed after archival.
+// Provider/model/account labels stay in the review rows as historical evidence;
+// only the now-invalid foreign keys are cleared.
+func restoreTaskSupervision(
+	tx *sql.Tx,
+	configRaw, roundsRaw, reviewsRaw, decisionsRaw json.RawMessage,
+) ([]string, error) {
+	warnings := []string{}
+	normalizeProfiles := func(raw json.RawMessage, fields ...string) (json.RawMessage, error) {
+		rows, err := decodeArchiveRows(raw)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			for _, field := range fields {
+				profileID, ok := jsonInt64(row[field])
+				if !ok || profileID <= 0 || rowExists(tx, "llm_profiles", profileID) {
+					continue
+				}
+				row[field] = nil
+				warnings = append(warnings, fmt.Sprintf("supervisor LLM profile %d has been deleted; %s restored without a live binding", profileID, field))
+			}
+		}
+		return json.Marshal(rows)
+	}
+	var err error
+	if configRaw, err = normalizeProfiles(configRaw, "primary_profile_id", "secondary_profile_id"); err != nil {
+		return nil, fmt.Errorf("restore task supervisor config: %w", err)
+	}
+	if reviewsRaw, err = normalizeProfiles(reviewsRaw, "profile_id"); err != nil {
+		return nil, fmt.Errorf("restore supervisor reviews: %w", err)
+	}
+	if decisionsRaw, err = normalizeProfiles(decisionsRaw, "arbiter_profile_id"); err != nil {
+		return nil, fmt.Errorf("restore supervisor decisions: %w", err)
+	}
+	for _, item := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"task_supervisor_config", configRaw},
+		{"supervisor_rounds", roundsRaw},
+		{"supervisor_reviews", reviewsRaw},
+		{"supervisor_decisions", decisionsRaw},
+	} {
+		if err := insertArchiveRows(tx, item.name, item.raw); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", item.name, err)
+		}
 	}
 	return warnings, nil
 }

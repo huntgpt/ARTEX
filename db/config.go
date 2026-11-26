@@ -329,6 +329,10 @@ WHERE t.llm_profile_id=$1
        SELECT 1 FROM task_llm_profiles x
        WHERE x.task_id=t.id AND x.profile_id=$1
    )
+   OR EXISTS (
+       SELECT 1 FROM task_supervisor_config s
+       WHERE s.task_id=t.id AND (s.primary_profile_id=$1 OR s.secondary_profile_id=$1)
+   )
 ORDER BY t.id
 FOR UPDATE OF t`, id)
 	if err != nil {
@@ -379,6 +383,10 @@ WHERE t.llm_profile_id=$1
        SELECT 1 FROM task_llm_profiles x
        WHERE x.task_id=t.id AND x.profile_id=$1
    )
+	OR EXISTS (
+		SELECT 1 FROM task_supervisor_config s
+		WHERE s.task_id=t.id AND (s.primary_profile_id=$1 OR s.secondary_profile_id=$1)
+	)
 	UNION ALL
 	SELECT 'agent', a.id FROM agents a WHERE a.llm_profile_id=$1
 	UNION ALL

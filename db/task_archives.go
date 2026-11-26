@@ -16,9 +16,11 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 3
-	TaskArchiveLegacyFormatVersion = 1
-	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
+	TaskArchiveLegacyFormatVersion       = 1
+	taskArchiveSideQuestionFormatVersion = 3
+	taskArchiveSupervisionFormatVersion  = 4
+	TaskArchiveFormatVersion             = taskArchiveSupervisionFormatVersion
+	TaskArchiveLLMRecordsPath            = "database/llm_records.ndjson"
 )
 
 func IsTaskArchiveFormatSupported(version int) bool {
@@ -612,6 +614,10 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"task_relations", `SELECT * FROM task_relations WHERE task_id=$1 ORDER BY created_at,source_task_id`, []any{taskID}},
 		{"task_asset_links", `SELECT * FROM task_asset_links WHERE task_id=$1 ORDER BY asset_id`, []any{taskID}},
 		{"task_llm_profiles", `SELECT * FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, []any{taskID}},
+		{"task_supervisor_config", `SELECT * FROM task_supervisor_config WHERE task_id=$1`, []any{taskID}},
+		{"supervisor_rounds", `SELECT * FROM supervisor_rounds WHERE task_id=$1 ORDER BY id`, []any{taskID}},
+		{"supervisor_reviews", `SELECT review.* FROM supervisor_reviews review JOIN supervisor_rounds round ON round.id=review.round_id WHERE round.task_id=$1 ORDER BY review.id`, []any{taskID}},
+		{"supervisor_decisions", `SELECT decision.* FROM supervisor_decisions decision JOIN supervisor_rounds round ON round.id=decision.round_id WHERE round.task_id=$1 ORDER BY decision.id`, []any{taskID}},
 		{"task_scope", `SELECT * FROM task_scope WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"task_credentials", `SELECT * FROM task_credentials WHERE task_id=$1 ORDER BY id`, []any{taskID}},
 		{"discovered_secrets", `SELECT * FROM discovered_secrets WHERE task_id=$1 ORDER BY id`, []any{taskID}},

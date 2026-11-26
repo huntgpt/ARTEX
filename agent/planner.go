@@ -598,6 +598,7 @@ Task goal: {{.Goal}}
    - If it can be judged from existing facts/the situation, don't probe at all.
 
 4. **Decide which new directions to add**: **"restraint" here means only [not duplicating existing intents], not "dispatch as few as possible"** — while the goal is unmet, the default question is "to close in on the goal, which deeper, harder, still-uncovered plays remain", not "can we wrap up". Intents are [open exploration directions] (not fixed types/a menu); judge directions from known facts, assets, and goals, and compare each against open + running + recent_done:
+	- **Secret and public-bundle split**: never use scanner verified=false to seal a public-secret direction. Treat public exposure and live credential validity as two different work items. Source exposure requires contextual review of the exact public commit/file or live browser-loaded bundle and may become a finding even when usability is unknown. Credential validation requires its own target/identity context, one-shot safety/lockout controls and separate evidence. Likewise, a 404/no-route response from an API root does not cover the frontend: when the application direction is open, dispatch HTML → scripts/lazy chunks/source maps/runtime config → API-route correlation work before calling it covered.
    - Already covered by open/running → don't generate (being handled).
    - Appears in recent_done → **first look at that intent's state (each carries one) to tell how it ended, then decide**:
      · **done (ran to completion)**: covered → don't re-dispatch as-is; whether it's a dead end depends on the fact conclusions it yielded, not the state; re-dispatch only on [material new mechanics] (new facts/assets/parameters/clearly different play), with the summary stating what's different from last time; rephrasing or "maybe one more try" doesn't count — no retries.
@@ -685,6 +686,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	overview := tsx.graphOverviewData()
 	situational := plannerSituational(triggers, storeTriggerLookup(ts), overview, env)
 	situational += plannerParallelismBlock(p.workerCapacity(), overview)
+	situational += supervisorAdviceBlock(ctx, env)
 	// Task-level deadline / endgame mode (injected via ctx, see taskclock.go). On the
 	// endgame round, the task-timeout planner wrap-up prompt is spliced into this
 	// round's user input (along with situational) as [this round's operating

@@ -777,7 +777,7 @@ func (s *Server) reseedMainAgentPrompt() {
 // settings flag guard → done only once. Fresh DBs need nothing (SeedPromptIfEmpty already seeds the latest default). Structurally identical to
 // reseedGoalsPrompt.
 func (s *Server) reseedPlannerPrompt() {
-	const flag = "planner_prompt_compact_realistic_v3"
+	const flag = "planner_prompt_secret_bundle_semantics_v4"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -807,7 +807,7 @@ func (s *Server) reseedPlannerPrompt() {
 // SeedPromptIfEmpty is first-insert-only; versions already in old DBs never got it, so version management [appends a new version] and switches to it; old versions stay in history and can be recovered.
 // settings flag guard → done only once. Fresh DBs need nothing. Structurally identical to reseedGoalsPrompt.
 func (s *Server) reseedWorkerPrompt() {
-	const flag = "worker_prompt_compact_v4"
+	const flag = "worker_prompt_secret_bundle_semantics_v5"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}

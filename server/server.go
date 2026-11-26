@@ -224,6 +224,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		b := s.agentsForTask(t)
 		return b.pl, b.wk
 	})
+	s.engine.SetSupervisor(s.runSupervisorCheckpoint)
 	// Global readiness (Ready()/llm_configured): a global active LLM provider is
 	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
 	s.engine.SetReadiness(func() bool {
@@ -830,6 +831,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/ad/runs/{run}/transition", s.transitionTaskADRun)
 	mux.HandleFunc("GET /api/tasks/{id}/red-team-workflow", s.taskRedTeamWorkflow)
 	mux.HandleFunc("POST /api/tasks/{id}/red-team-workflow/{phase}/transition", s.transitionTaskRedTeamPhase)
+	mux.HandleFunc("GET /api/tasks/{id}/supervisor", s.getTaskSupervisor)
+	mux.HandleFunc("PUT /api/tasks/{id}/supervisor", s.updateTaskSupervisor)
+	mux.HandleFunc("GET /api/tasks/{id}/supervisor/rounds", s.listTaskSupervisorRounds)
+	mux.HandleFunc("POST /api/tasks/{id}/supervisor/run", s.runTaskSupervisor)
 	mux.HandleFunc("GET /api/tasks/{id}/coverage-graph", s.taskCoverageGraph)
 	mux.HandleFunc("GET /api/tasks/{id}/asset-refs", s.taskAssetRefs)
 	mux.HandleFunc("POST /api/tasks/{id}/assets", s.attachTaskAssets)
@@ -1781,21 +1786,22 @@ func truncateReply(s string) string {
 }
 
 type createTaskReq struct {
-	Name                 string   `json:"name,omitempty"` // optional task name; omitted/empty = unnamed
-	CategoryID           *int64   `json:"category_id,omitempty"`
-	Description          string   `json:"description"`
-	Goal                 string   `json:"goal"`
-	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`  // the LLM profile to run this task on; omitted/null = use the active profile
-	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"` // ordered task-level profile chain; the first entry takes effect initially
-	SourceTaskIDs        []string `json:"source_task_ids,omitempty"` // direct, read-only inherited source tasks
-	CompanyIDs           []int64  `json:"company_ids,omitempty"`     // links the company scope and snapshots its current assets; does not copy assets or force intent generation
-	TimeoutSeconds       int      `json:"timeout_seconds"`
-	LLMRotate            *bool    `json:"llm_rotate"`                  // distribute worker intents across the ordered profiles
-	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner heartbeat interval (seconds); 0/omitted = default 600 (10min); floor = default = 600, lower values are raised to 600
-	PlanQuietMode        *bool    `json:"plan_quiet_mode,omitempty"`   // planner quiet-mode switch (#86); omitted = default on; false = edge rounds always plan
-	TargetGate           *bool    `json:"target_gate,omitempty"`       // approval gate for asset targets, opt-in; omitted/null = off
-	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // issue one seed intent at creation (content = description + goal) so a worker can start right away without waiting for the first planner round; omitted/null = default off, the standard plan-then-execute flow. Pass true explicitly to enable (for CTF tasks often solved in one work, this skips the pre-start planner round).
-	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // asset coverage feature; omitted/null = default on (true). false = disables coverage calculation/display/auto-accumulated scope + hides add_task_scope/list_untested_assets. company links are unaffected.
+	Name                 string                   `json:"name,omitempty"` // optional task name; omitted/empty = unnamed
+	CategoryID           *int64                   `json:"category_id,omitempty"`
+	Description          string                   `json:"description"`
+	Goal                 string                   `json:"goal"`
+	LLMProfileID         *int64                   `json:"llm_profile_id,omitempty"`  // the LLM profile to run this task on; omitted/null = use the active profile
+	LLMProfileIDs        []int64                  `json:"llm_profile_ids,omitempty"` // ordered task-level profile chain; the first entry takes effect initially
+	SourceTaskIDs        []string                 `json:"source_task_ids,omitempty"` // direct, read-only inherited source tasks
+	CompanyIDs           []int64                  `json:"company_ids,omitempty"`     // links the company scope and snapshots its current assets; does not copy assets or force intent generation
+	TimeoutSeconds       int                      `json:"timeout_seconds"`
+	LLMRotate            *bool                    `json:"llm_rotate"`                  // distribute worker intents across the ordered profiles
+	PlanHeartbeatSeconds int                      `json:"plan_heartbeat_seconds"`      // planner heartbeat interval (seconds); 0/omitted = default 600 (10min); floor = default = 600, lower values are raised to 600
+	PlanQuietMode        *bool                    `json:"plan_quiet_mode,omitempty"`   // planner quiet-mode switch (#86); omitted = default on; false = edge rounds always plan
+	TargetGate           *bool                    `json:"target_gate,omitempty"`       // approval gate for asset targets, opt-in; omitted/null = off
+	SeedFirstIntent      *bool                    `json:"seed_first_intent,omitempty"` // issue one seed intent at creation (content = description + goal) so a worker can start right away without waiting for the first planner round; omitted/null = default off, the standard plan-then-execute flow. Pass true explicitly to enable (for CTF tasks often solved in one work, this skips the pre-start planner round).
+	CoverageEnabled      *bool                    `json:"coverage_enabled,omitempty"`  // asset coverage feature; omitted/null = default on (true). false = disables coverage calculation/display/auto-accumulated scope + hides add_task_scope/list_untested_assets. company links are unaffected.
+	Supervisor           *db.TaskSupervisorConfig `json:"supervisor,omitempty"`        // stable project lead(s); separate from the worker failover chain
 	// InterceptRules: task-level asset interception/allow rules (entered at creation, stored in task_intercept_rules, never the global table).
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 	// Credentials: test accounts declared at creation (#3). An empty password means
@@ -1825,6 +1831,25 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	if err := s.validateTaskProfileIDs(req.LLMProfileIDs); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if req.Supervisor != nil {
+		normalized, err := db.NormalizeTaskSupervisorConfig(req.Supervisor)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		leadIDs := make([]int64, 0, 2)
+		if normalized.PrimaryProfileID != nil {
+			leadIDs = append(leadIDs, *normalized.PrimaryProfileID)
+		}
+		if normalized.SecondaryProfileID != nil {
+			leadIDs = append(leadIDs, *normalized.SecondaryProfileID)
+		}
+		if err := s.validateTaskProfileIDs(leadIDs); err != nil {
+			writeErr(w, 400, "invalid supervisor profile: "+err.Error())
+			return
+		}
+		req.Supervisor = &normalized
 	}
 	if err := goalGateCheck(req.Goal); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1871,6 +1896,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		InterceptRules:  interceptRules,
 		LLMRotate:       req.LLMRotate,
 		TargetGate:      req.TargetGate,
+		Supervisor:      req.Supervisor,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {

@@ -36,10 +36,77 @@ export interface Task {
   active_llm_profile_id?: number; // profile used by the next LLM call
   llm_failover_state?: "default" | "ready" | "chain_exhausted" | string;
   llm_failover_reason?: string;
+  supervisor?: TaskSupervisorConfig;
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
   archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // asset coverage feature switch (fixed at creation, on by default); false = do not compute/show coverage
+}
+
+export type TaskSupervisorMode = "off" | "single" | "dual";
+export type TaskSupervisorCheckpointPolicy = "strategic" | "every_round" | "manual";
+
+export interface TaskSupervisorConfig {
+  mode: TaskSupervisorMode;
+  primary_profile_id?: number;
+  secondary_profile_id?: number;
+  checkpoint_policy: TaskSupervisorCheckpointPolicy;
+  revision: number;
+}
+
+export interface SupervisorReview {
+  id: number;
+  round_id: number;
+  lead_role: "primary" | "secondary";
+  profile_id?: number;
+  provider: string;
+  model: string;
+  account_label: string;
+  state: "pending" | "running" | "completed" | "failed" | "cancelled";
+  proposal?: Record<string, unknown>;
+  summary: string;
+  error?: string;
+  input_tokens: number;
+  output_tokens: number;
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupervisorDecision {
+  id: number;
+  round_id: number;
+  arbiter_profile_id?: number;
+  decision: Record<string, unknown>;
+  rationale: string;
+  created_at: string;
+}
+
+export interface SupervisorRound {
+  id: number;
+  task_id: number;
+  trigger_kind: string;
+  state: "pending" | "running" | "merging" | "completed" | "partial" | "failed" | "cancelled";
+  snapshot_hash: string;
+  snapshot: Record<string, unknown>;
+  reviews: SupervisorReview[];
+  decision?: SupervisorDecision;
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SupervisorAdvice {
+  round_id: number;
+  snapshot_hash: string;
+  state: string;
+  primary?: Record<string, unknown>;
+  secondary?: Record<string, unknown>;
+  decision?: Record<string, unknown>;
+  rationale?: string;
+  degraded_cause?: string;
 }
 
 export interface TaskCategory {
@@ -975,6 +1042,7 @@ export interface Session {
   live: boolean;
   last_activity: string;
   intent_id?: string;
+  owner?: string; // concrete execution lane, e.g. work#1
   source_task_id?: string;
   inherited?: boolean;
   seg?: number; // main-agent session: which conversation segment (0 = original)

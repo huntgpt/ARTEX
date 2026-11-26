@@ -1496,7 +1496,7 @@ func (s *ExplorationStore) EvidenceActivities(nodeIDs []int64) ([]Activity, erro
 		return []Activity{}, nil
 	}
 	rows, err := s.db.Query(`
-SELECT id,node_id,COALESCE(worker,''),COALESCE(kind,''),COALESCE(tool,''),COALESCE(tool_use_id,''),is_error,COALESCE(summary,''),metadata,created_at
+SELECT id,node_id,COALESCE(worker,''),COALESCE(kind,''),COALESCE(tool,''),COALESCE(tool_use_id,''),is_error,COALESCE(summary,''),COALESCE(detail,''),metadata,created_at
 FROM activity
 WHERE exploration_id=$1 AND node_id=ANY($2::bigint[]) AND metadata ? 'evidence_artifacts'
 ORDER BY created_at,id`, s.expID, nodeIDs)
@@ -1507,7 +1507,7 @@ ORDER BY created_at,id`, s.expID, nodeIDs)
 	out := []Activity{}
 	for rows.Next() {
 		var a Activity
-		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.Metadata, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.Detail, &a.Metadata, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

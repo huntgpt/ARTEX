@@ -78,7 +78,7 @@ func TestKillWorkCancelsOnlyThatWorkWithNamedCause(t *testing.T) {
 	e := NewEngine(nil)
 	execCtx := e.execContextFor(context.Background(), "t1")
 	workCtx, workCancel := context.WithCancelCause(execCtx)
-	e.registerWork(42, workCancel)
+	run := e.registerWork(42, workCancel)
 	if err := e.KillWork(42); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,78 @@ func TestKillWorkCancelsOnlyThatWorkWithNamedCause(t *testing.T) {
 	if execCtx.Err() != nil {
 		t.Fatal("kill_work cancelled the entire task context")
 	}
-	_, complete := e.detachWork(42)
+	_, complete := e.detachWork(42, run)
+	complete(nil)
+}
+
+func TestStaleWorkDetachCannotCancelReplacementGeneration(t *testing.T) {
+	e := NewEngine(nil)
+	oldCtx, oldCancel := context.WithCancelCause(context.Background())
+	oldRun := e.registerWork(42, oldCancel)
+	e.steerMu.Lock()
+	e.steerBox[42] = []string{"keep for the replacement"}
+	e.steerMu.Unlock()
+
+	newCtx, newCancel := context.WithCancelCause(context.Background())
+	newRun := e.registerWork(42, newCancel)
+	if cause := context.Cause(oldCtx); !errors.Is(cause, agent.AbortWorkClaimLost) {
+		t.Fatalf("replaced generation cause=%v, want AbortWorkClaimLost", cause)
+	}
+	if newCtx.Err() != nil {
+		t.Fatalf("replacement was cancelled during registration: %v", context.Cause(newCtx))
+	}
+
+	// The stale goroutine returns after the replacement has registered. Its
+	// cleanup must be a no-op for both the live control handle and its steering.
+	action, complete := e.detachWork(42, oldRun)
+	if action != "" {
+		t.Fatalf("stale detach inherited replacement action %q", action)
+	}
+	complete(nil)
+	if newCtx.Err() != nil {
+		t.Fatalf("stale detach cancelled replacement: %v", context.Cause(newCtx))
+	}
+	e.workMu.Lock()
+	if got := e.work[42]; got != newRun {
+		e.workMu.Unlock()
+		t.Fatalf("live generation=%p, want replacement %p", got, newRun)
+	}
+	e.workMu.Unlock()
+	e.steerMu.Lock()
+	if len(e.steerBox[42]) != 1 {
+		e.steerMu.Unlock()
+		t.Fatal("stale detach deleted replacement steering")
+	}
+	e.steerMu.Unlock()
+
+	_, complete = e.detachWork(42, newRun)
+	complete(nil)
+}
+
+func TestStaleWorkDetachReleasesItsControlWaiter(t *testing.T) {
+	e := NewEngine(nil)
+	oldCtx, oldCancel := context.WithCancelCause(context.Background())
+	oldRun := e.registerWork(42, oldCancel)
+	wait := make(chan error, 1)
+	go func() { wait <- e.ControlWork(context.Background(), 42, "pause") }()
+	<-oldCtx.Done()
+
+	newCtx, newCancel := context.WithCancelCause(context.Background())
+	newRun := e.registerWork(42, newCancel)
+	_, complete := e.detachWork(42, oldRun)
+	complete(nil)
+	select {
+	case err := <-wait:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stale generation's ControlWork waiter was not released")
+	}
+	if newCtx.Err() != nil {
+		t.Fatalf("stale control cleanup cancelled replacement: %v", context.Cause(newCtx))
+	}
+	_, complete = e.detachWork(42, newRun)
 	complete(nil)
 }
 
@@ -103,14 +174,14 @@ func TestControlWorkCarriesUserActionCause(t *testing.T) {
 		t.Run(tc.action, func(t *testing.T) {
 			e := NewEngine(nil)
 			ctx, cancel := context.WithCancelCause(context.Background())
-			e.registerWork(42, cancel)
+			run := e.registerWork(42, cancel)
 			done := make(chan error, 1)
 			go func() { done <- e.ControlWork(context.Background(), 42, tc.action) }()
 			<-ctx.Done()
 			if code, _, _, _ := agent.AbortReason(ctx); code != tc.code {
 				t.Fatalf("code=%q, want %q", code, tc.code)
 			}
-			action, complete := e.detachWork(42)
+			action, complete := e.detachWork(42, run)
 			if action != tc.action {
 				t.Fatalf("action=%q, want %q", action, tc.action)
 			}
@@ -125,11 +196,11 @@ func TestControlWorkCarriesUserActionCause(t *testing.T) {
 func TestControlWorkReturnsSettlementError(t *testing.T) {
 	e := NewEngine(nil)
 	ctx, cancel := context.WithCancelCause(context.Background())
-	e.registerWork(42, cancel)
+	run := e.registerWork(42, cancel)
 	done := make(chan error, 1)
 	go func() { done <- e.ControlWork(context.Background(), 42, "pause") }()
 	<-ctx.Done()
-	_, complete := e.detachWork(42)
+	_, complete := e.detachWork(42, run)
 	want := errors.New("pause persistence failed")
 	complete(want)
 	if err := <-done; !errors.Is(err, want) {
@@ -140,7 +211,7 @@ func TestControlWorkReturnsSettlementError(t *testing.T) {
 func TestControlWorkWaitHonorsContextAndReleasesReservation(t *testing.T) {
 	e := NewEngine(nil)
 	_, cancel := context.WithCancelCause(context.Background())
-	e.registerWork(42, cancel)
+	registered := e.registerWork(42, cancel)
 	waitCtx, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer stop()
 	if err := e.ControlWork(waitCtx, 42, "pause"); !errors.Is(err, context.DeadlineExceeded) {
@@ -148,26 +219,26 @@ func TestControlWorkWaitHonorsContextAndReleasesReservation(t *testing.T) {
 	}
 
 	e.workMu.Lock()
-	run := e.work[42]
-	if run == nil || run.action != "" {
-		t.Fatalf("timed-out control left reservation: %+v", run)
+	current := e.work[42]
+	if current == nil || current != registered || current.action != "" {
+		t.Fatalf("timed-out control left reservation: %+v", current)
 	}
 	e.workMu.Unlock()
-	_, complete := e.detachWork(42)
+	_, complete := e.detachWork(42, registered)
 	complete(nil)
 }
 
 func TestControlWorkRejectsConcurrentController(t *testing.T) {
 	e := NewEngine(nil)
 	ctx, cancel := context.WithCancelCause(context.Background())
-	e.registerWork(42, cancel)
+	run := e.registerWork(42, cancel)
 	first := make(chan error, 1)
 	go func() { first <- e.ControlWork(context.Background(), 42, "pause") }()
 	<-ctx.Done()
 	if err := e.ControlWork(context.Background(), 42, "cancel"); !errors.Is(err, errWorkControlConflict) {
 		t.Fatalf("second control error=%v, want conflict", err)
 	}
-	action, complete := e.detachWork(42)
+	action, complete := e.detachWork(42, run)
 	if action != "pause" {
 		t.Fatalf("winning action=%q, want pause", action)
 	}

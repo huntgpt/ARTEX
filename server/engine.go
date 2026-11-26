@@ -156,6 +156,9 @@ type Engine struct {
 	// (for example an exhausted failover chain) — there is no global-pair fallback.
 	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
 	resolveAuthoritative bool
+	// supervise runs independent project-lead review before the canonical
+	// Planner. A failure degrades the round but never prevents Planner progress.
+	supervise func(context.Context, *Task, []agent.TriggerEvent, string) (agent.SupervisorAdvice, error)
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
 	readiness func() bool
@@ -460,30 +463,53 @@ func NewEngine(m *Manager) *Engine {
 		runtimes: map[string]*taskRuntime{}}
 }
 
-// registerWork records the cancel for the work currently running intentID.
-func (e *Engine) registerWork(intentID int64, cancel context.CancelCauseFunc) {
+// registerWork records the cancel for the work currently running intentID and
+// returns the exact in-memory execution generation. An expired database claim
+// may be taken over while the stale goroutine is still unwinding; the returned
+// identity lets detachWork prove it is removing its own generation rather than
+// the replacement worker's control handle.
+func (e *Engine) registerWork(intentID int64, cancel context.CancelCauseFunc) *workExecution {
+	run := &workExecution{cancel: cancel, done: make(chan error, 1)}
 	e.workMu.Lock()
-	e.work[intentID] = &workExecution{cancel: cancel, done: make(chan error, 1)}
+	if stale := e.work[intentID]; stale != nil {
+		// A new registration for the same intent is only possible after the
+		// database lease was reclaimed. Stop the stale local generation
+		// immediately; its fenced DB writes will also be rejected.
+		stale.cancel(agent.AbortWorkClaimLost)
+	}
+	e.work[intentID] = run
 	e.workMu.Unlock()
+	return run
 }
 
 // detachWork removes the live control handle once Execute has returned. complete
 // must be called after the final intent state write so a waiting cancel handler can
 // safely delete the worker's blackboard output without racing a late write.
-func (e *Engine) detachWork(intentID int64) (action string, complete func(error)) {
+func (e *Engine) detachWork(intentID int64, expected *workExecution) (action string, complete func(error)) {
 	e.workMu.Lock()
 	run := e.work[intentID]
-	if run != nil {
+	if run != nil && run == expected {
 		delete(e.work, intentID)
 		action = run.action
 		run.cancel(agent.AbortWorkFinished) // release resources (no-op if already cancelled)
+	} else {
+		// A newer claimer replaced this generation. The stale worker must not
+		// delete/cancel the replacement or consume its queued steering. Keep
+		// expected only as a completion target so a ControlWork caller already
+		// waiting on the stale generation cannot hang until its timeout.
+		run = nil
 	}
 	e.workMu.Unlock()
-	e.steerMu.Lock()
-	delete(e.steerBox, intentID) // drop any undelivered steering for a finished work
-	e.steerMu.Unlock()
+	if run != nil {
+		e.steerMu.Lock()
+		delete(e.steerBox, intentID) // drop steering only for the generation that actually detached
+		e.steerMu.Unlock()
+	}
 	if run == nil {
-		return action, func(error) {}
+		if expected == nil {
+			return action, func(error) {}
+		}
+		return action, func(err error) { expected.done <- err }
 	}
 	return action, func(err error) { run.done <- err }
 }
@@ -802,6 +828,11 @@ func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner,
 	e.resolveAuthoritative = true
 }
 
+// SetSupervisor installs the optional task project-supervision checkpoint.
+func (e *Engine) SetSupervisor(fn func(context.Context, *Task, []agent.TriggerEvent, string) (agent.SupervisorAdvice, error)) {
+	e.supervise = fn
+}
+
 // snapshotFor returns the planner/worker a task should run on, from the task-router
 // resolver. nil,nil means the task is deliberately unavailable (e.g. an exhausted
 // failover chain); there is no global-pair fallback.
@@ -1005,15 +1036,35 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			return
 		}
 		log.Printf("[planner] task %s planning… (trigger: %s)", t.ID, src)
-		// round marker: each Plan() is one planner round; emit a boundary so the
-		// UI can separate rounds in the transcript (kind='round').
-		e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
-			Summary: fmt.Sprintf("Planning round %d", e.nextPlannerRound(t.ID))})
 		// what fired this round (worker done / finding; may be several — debounce
 		// coalesces a burst; empty for time/heartbeat wakes).
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		var advice agent.SupervisorAdvice
+		var superviseErr error
+		if e.supervise != nil {
+			e.BeginLLMCall(t.ID)
+			// Supervision receives the task context, not the Planner's budget
+			// context. Its own bounded child context cannot consume or cancel the
+			// canonical planning window when a lead or arbiter is slow.
+			advice, superviseErr = e.supervise(ectx, t, triggers, src)
+			e.EndLLMCall(t.ID)
+		}
+		// The marker is deliberately written after the pending-manual-decision
+		// lookup above. Its timestamp is the durable acknowledgement that this
+		// Planner round consumed that advisory decision.
+		e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
+			Summary: fmt.Sprintf("Planning round %d", e.nextPlannerRound(t.ID))})
 		pctx := e.budgetRoundCtx(e.plannerGateContext(ectx, t, intercept.DefaultTargetWaitBound), t, false)
+		if superviseErr != nil {
+			log.Printf("[supervisor] task %s checkpoint degraded: %v", t.ID, superviseErr)
+			e.emitActivity(t, db.Activity{Worker: "supervisor", Kind: "result", Summary: "Project-lead review degraded", Detail: superviseErr.Error()})
+		} else if advice.RoundID > 0 {
+			pctx = agent.WithSupervisorAdvice(pctx, advice)
+			e.emitActivity(t, db.Activity{Worker: "supervisor", Kind: "result",
+				Summary: fmt.Sprintf("Project-lead review round #%d %s", advice.RoundID, advice.State),
+				Detail:  fmt.Sprintf("snapshot=%s", advice.SnapshotHash)})
+		}
 		e.BeginLLMCall(t.ID)
 		met, reason, err := planner.Plan(pctx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, t.TargetGuard.Hooks(), emit)
 		e.EndLLMCall(t.ID)
@@ -1226,7 +1277,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 		return true
 	}
-	e.registerWork(intent.ID, workCancel)
+	workRun := e.registerWork(intent.ID, workCancel)
 	stopHeartbeat := startClaimHeartbeat(t.Store, db.IntentClaimHeartbeatInterval, name, intent.ID, token, workCancel)
 	// wrap the guard hooks so steer_work can inject a mid-run course-correction
 	// for THIS intent (drained before the worker's next tool call).
@@ -1294,7 +1345,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// work would be wrongly marked stopped.
 	workCause := context.Cause(workCtx)
 	killed := workCtx.Err() != nil && ectx.Err() == nil
-	action, completeWork := e.detachWork(intent.ID)
+	action, completeWork := e.detachWork(intent.ID, workRun)
 	// A caller may stop waiting and release its in-memory reservation before the
 	// agent honors cancellation. The named context cause remains authoritative and
 	// still settles the stopped run into a recoverable state.

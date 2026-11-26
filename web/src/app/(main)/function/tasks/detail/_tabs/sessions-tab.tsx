@@ -342,6 +342,7 @@ function intentToSession(n: TaskNode): Session {
     live: !n.inherited && state === "running",
     last_activity: n.ts,
     intent_id: n.id,
+    owner: n.owner,
     source_task_id: n.source_task_id,
     inherited: n.inherited,
   };
@@ -399,6 +400,11 @@ function SessionItem({
           <span className="shrink-0 rounded bg-muted px-1 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
             #{s.intent_id}
           </span>
+        )}
+        {s.role === "worker" && s.owner && (
+          <Badge variant={s.status === "running" ? "default" : "outline"} className="shrink-0 font-mono text-[10px]">
+            {s.owner}
+          </Badge>
         )}
         {s.inherited && s.source_task_id && (
           <Badge variant="outline" className="shrink-0">
@@ -540,6 +546,7 @@ export function SessionsTab({ taskId, taskPaused = false }: { taskId: string; ta
   const [olderIntentsHasMore, setOlderIntentsHasMore] = React.useState(false);
   const [hasLoadedOlderIntentsPage, setHasLoadedOlderIntentsPage] = React.useState(false);
   const [loadingOlderIntents, setLoadingOlderIntents] = React.useState(false);
+  const [workerCapacity, setWorkerCapacity] = React.useState(3);
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
@@ -556,6 +563,21 @@ export function SessionsTab({ taskId, taskPaused = false }: { taskId: string; ta
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    api
+      .settings()
+      .then((settings) => {
+        if (active && settings.workers && settings.workers > 0) setWorkerCapacity(settings.workers);
+      })
+      .catch(() => {
+        // The backend default is three; a later task-page mount retries.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function pickFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -1145,12 +1167,22 @@ export function SessionsTab({ taskId, taskPaused = false }: { taskId: string; ta
       .finally(() => setLoadingOlderIntents(false));
   }, [taskId, intents, olderIntents, loadingOlderIntents]);
 
-  // Combined, de-duplicated worker list (newest first page + older loaded pages).
+  // Combined, de-duplicated worker list. Live/frontier work must stay above
+  // history even when its intent id is old; ordering only by id made a busy task
+  // look idle whenever an older paused intent was resumed.
   const allIntents = React.useMemo(() => {
     const byId = new Map<string, TaskNode>();
     for (const n of olderIntents) byId.set(n.id, n);
     for (const n of intents) byId.set(n.id, n); // fresh poll wins over older snapshot
-    return [...byId.values()].sort((a, b) => Number(b.id) - Number(a.id));
+    const rank = (state: string) => {
+      if (state === "running") return 0;
+      if (state === "open") return 1;
+      if (state === "paused") return 2;
+      if (state === "blocked" || state === "exhausted") return 3;
+      if (state === "done" || state === "stopped") return 4;
+      return 5;
+    };
+    return [...byId.values()].sort((a, b) => rank(a.state) - rank(b.state) || Number(b.id) - Number(a.id));
   }, [intents, olderIntents]);
   const intentAssetsByID = React.useMemo(() => {
     const grouped = new Map<string, IntentAsset[]>();
@@ -1164,6 +1196,16 @@ export function SessionsTab({ taskId, taskPaused = false }: { taskId: string; ta
   }, [intentAssets]);
 
   const workerSessions = React.useMemo(() => allIntents.map(intentToSession), [allIntents]);
+  const workerLanes = React.useMemo(() => {
+    const runningByOwner = new Map(
+      workerSessions.filter((session) => session.status === "running" && session.owner).map((session) => [session.owner!, session]),
+    );
+    return Array.from({ length: workerCapacity }, (_, index) => {
+      const owner = `work#${index + 1}`;
+      return { owner, session: runningByOwner.get(owner) };
+    });
+  }, [workerCapacity, workerSessions]);
+  const queuedWorkerCount = workerSessions.filter((session) => session.status === "pending").length;
   const intentsHasMore = hasLoadedOlderIntentsPage ? olderIntentsHasMore : firstIntentsHasMore;
 
   // For each worker session (intent), derive the display title from the intent
@@ -1689,6 +1731,12 @@ export function SessionsTab({ taskId, taskPaused = false }: { taskId: string; ta
                     <div className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-muted-foreground">
                       <Meta.icon className="size-3.5" />
                       {Meta.label}
+                      {role === "worker" && (
+                        <span className="ml-auto tabular-nums">
+                          {workerLanes.filter((lane) => lane.session).length}/{workerCapacity} {t("active")}
+                          {queuedWorkerCount > 0 ? ` · ${queuedWorkerCount} ${t("queued")}` : ""}
+                        </span>
+                      )}
                       {role === "mainagent" && (
                         <button
                           type="button"
@@ -1707,6 +1755,39 @@ export function SessionsTab({ taskId, taskPaused = false }: { taskId: string; ta
                         </button>
                       )}
                     </div>
+                    {role === "worker" && (
+                      <fieldset
+                        className="mb-1 grid gap-1 rounded-md border bg-muted/20 p-1.5"
+                        aria-label={t("Worker lanes")}
+                      >
+                        {workerLanes.map(({ owner, session }) => (
+                          <button
+                            key={owner}
+                            type="button"
+                            disabled={!session}
+                            onClick={() => session && setActiveId(session.id)}
+                            className="flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] enabled:hover:bg-accent disabled:cursor-default"
+                          >
+                            {session ? (
+                              <Loader2Icon className="size-3 shrink-0 animate-spin text-blue-500" />
+                            ) : (
+                              <span className="size-2 shrink-0 rounded-full bg-muted-foreground/30" />
+                            )}
+                            <span className="w-12 shrink-0 font-mono font-medium">{owner}</span>
+                            {session ? (
+                              <>
+                                <span className="shrink-0 font-mono text-muted-foreground">#{session.intent_id}</span>
+                                <span className="min-w-0 truncate">{sessionMeta.get(session.id)?.title ?? session.title}</span>
+                              </>
+                            ) : (
+                              <span className="min-w-0 truncate text-muted-foreground">
+                                {taskPaused ? t("Task paused") : t("Idle — no prerequisite-ready intent")}
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                      </fieldset>
+                    )}
                     {items.map((s) => {
                       const meta = s.role === "worker" ? sessionMeta.get(s.id) : undefined;
                       return (

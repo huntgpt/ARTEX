@@ -2309,6 +2309,7 @@ func (s *Server) restoreTasksAfterProfileDelete(pg *db.DB) {
 		if taskID, err := strconv.ParseInt(task.ID, 10, 64); err == nil {
 			if pt, err := pg.GetTask(taskID); err == nil && pt != nil {
 				s.syncTaskLLMState(pt)
+				task.setSupervisor(pt.Supervisor)
 				// Deleting the active entry may advance the task to a ready successor,
 				// or clear the explicit chain and restore its Agent/global fallback.
 				// Resume only intents that were blocked by the exhausted chain; a

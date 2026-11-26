@@ -72,6 +72,90 @@ type GoalSpec struct {
 	VulnClass string `json:"vulnclass,omitempty"`
 }
 
+// goalCompletionRequirements classifies only broad end-of-engagement
+// deliverables. Narrow goals (for example "verify SQL injection on /login")
+// keep the ordinary evidence-node proof semantics. A final report or a
+// complete evidence package, however, is a statement about task-wide state and
+// must also pass deterministic workflow/retest/report gates.
+func goalCompletionRequirements(goal *db.Node) db.GoalCompletionRequirements {
+	if goal == nil || goal.Kind != db.KindGoal {
+		return db.GoalCompletionRequirements{}
+	}
+	var payload struct {
+		Text    string `json:"text"`
+		Summary string `json:"summary"`
+	}
+	_ = json.Unmarshal(goal.Payload, &payload)
+	text := strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(payload.Text+" "+payload.Summary)), " "))
+	if text == "" {
+		return db.GoalCompletionRequirements{}
+	}
+	containsAll := func(parts ...string) bool {
+		for _, part := range parts {
+			if !strings.Contains(text, part) {
+				return false
+			}
+		}
+		return true
+	}
+	finalReport := strings.Contains(text, "final report") ||
+		strings.Contains(text, "final red-team assessment report") ||
+		strings.Contains(text, "complete assessment report") ||
+		strings.Contains(text, "รายงานฉบับสมบูรณ์") ||
+		strings.Contains(text, "รายงานสุดท้าย")
+	completeEvidence := containsAll("complete", "evidence") ||
+		strings.Contains(text, "every newly observed") ||
+		strings.Contains(text, "complete evidence package") ||
+		strings.Contains(text, "หลักฐานครบถ้วน")
+	fullAssessment := strings.Contains(text, "end-to-end assessment") ||
+		strings.Contains(text, "complete red-team assessment") ||
+		strings.Contains(text, "full red-team assessment")
+	confirmedAndRetested := containsAll("confirmed", "retested") ||
+		containsAll("ยืนยัน", "retest") ||
+		containsAll("ยืนยัน", "ทดสอบซ้ำ")
+	broad := finalReport || completeEvidence || fullAssessment || confirmedAndRetested
+	if !broad {
+		return db.GoalCompletionRequirements{}
+	}
+	return db.GoalCompletionRequirements{
+		WorkflowComplete: true,
+		FindingsVerified: true,
+		RetestsComplete:  finalReport || confirmedAndRetested,
+		ReportAvailable:  finalReport,
+	}
+}
+
+func (t *ToolSet) goalCompletionIssues(ctx context.Context, goal *db.Node) ([]string, error) {
+	if t == nil || t.ts == nil {
+		return nil, nil
+	}
+	return t.ts.GoalCompletionIssues(ctx, goalCompletionRequirements(goal))
+}
+
+// reopenInvalidMetGoals repairs goals that an older release marked met before
+// task-wide completion gates existed. This runs only at an attempted task
+// completion boundary, and only broad deliverables are eligible.
+func (t *ToolSet) reopenInvalidMetGoals(ctx context.Context, goals []*db.Node) (map[int64][]string, error) {
+	invalid := map[int64][]string{}
+	for _, goal := range goals {
+		if goal == nil || goal.State != "met" {
+			continue
+		}
+		issues, err := t.goalCompletionIssues(ctx, goal)
+		if err != nil {
+			return nil, err
+		}
+		if len(issues) == 0 {
+			continue
+		}
+		if err := t.ts.SetNodeState(goal.ID, "open"); err != nil {
+			return nil, err
+		}
+		invalid[goal.ID] = issues
+	}
+	return invalid, nil
+}
+
 // DecomposeGoals asks the LLM to break a pentest task goal into discrete,
 // independently-verifiable objectives (each becomes a goal node). Returns nil if
 // no provider is configured or the call yields nothing — the caller then falls

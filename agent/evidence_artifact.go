@@ -10,6 +10,7 @@ import (
 	"image/draw"
 	"image/png"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -224,7 +225,16 @@ func evidenceMetadata(existing json.RawMessage, artifacts []EvidenceArtifact) js
 	return out
 }
 
-func artifactsFromToolResult(output string) []EvidenceArtifact {
+// artifactsFromToolResult accepts artifacts only from ARTEX's code-owned
+// scanner-ingest tool. Target-controlled command output, custom tools, and an
+// LLM response may contain JSON that looks like an artifact envelope; treating
+// that text as evidence would let an arbitrary/mock image acquire a verified
+// badge. Terminal captures never come through this path: ARTEX creates them
+// itself from the audited tool_result below.
+func artifactsFromToolResult(sourceTool, output string) []EvidenceArtifact {
+	if !strings.EqualFold(strings.TrimSpace(sourceTool), "ingest_scan_output") {
+		return nil
+	}
 	var envelope struct {
 		Artifacts []EvidenceArtifact `json:"artifacts"`
 	}
@@ -233,10 +243,34 @@ func artifactsFromToolResult(output string) []EvidenceArtifact {
 	}
 	var out []EvidenceArtifact
 	for _, artifact := range envelope.Artifacts {
-		if artifact.Ref == "" || artifact.SHA256 == "" || artifact.MIMEType == "" {
+		if !validImportedBrowserArtifact(artifact) {
 			continue
 		}
 		out = append(out, artifact)
 	}
 	return out
+}
+
+func validImportedBrowserArtifact(artifact EvidenceArtifact) bool {
+	if artifact.Kind != "browser_screenshot" || artifact.Tool != "gowitness" ||
+		artifact.Ref == "" || filepath.IsAbs(artifact.Ref) || artifact.ByteSize <= 0 ||
+		artifact.CapturedAt.IsZero() || artifact.OriginalName == "" ||
+		artifact.OriginalName != filepath.Base(artifact.OriginalName) ||
+		len(artifact.SHA256) != 64 || strings.ToLower(artifact.SHA256) != artifact.SHA256 {
+		return false
+	}
+	if _, err := hex.DecodeString(artifact.SHA256); err != nil {
+		return false
+	}
+	switch artifact.MIMEType {
+	case "image/png", "image/jpeg", "image/webp":
+	default:
+		return false
+	}
+	clean := filepath.Clean(filepath.FromSlash(artifact.Ref))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return false
+	}
+	u, err := url.Parse(artifact.SourceURL)
+	return err == nil && u.User == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != ""
 }

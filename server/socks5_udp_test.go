@@ -53,27 +53,15 @@ func TestManagerSOCKS5UDPOptInAndAssetBlockRuleDropsDatagram(t *testing.T) {
 		t.Fatalf("expected SOCKS5+UDP enabled, got addr=%q udp=%v", socksAddr, mOn.traffic.SOCKS5UDPEnabled())
 	}
 
-	// Block 127.0.0.2 via global asset intercept rule; leave 127.0.0.1 allowed.
-	rule, err := mOn.pg.CreateAssetInterceptRule(
-		"exact_ip",
-		"127.0.0.2",
-		fmt.Sprintf("p41c-udp-block-%d", time.Now().UnixNano()),
-		true,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = mOn.pg.DeleteAssetInterceptRule(rule.ID) })
-
-	startEcho := func(bind string) (*net.UDPConn, *atomic.Int32) {
+	startEcho := func(bind string) (*net.UDPConn, *atomic.Int32, error) {
 		t.Helper()
 		ua, err := net.ResolveUDPAddr("udp4", bind)
 		if err != nil {
-			t.Fatal(err)
+			return nil, nil, err
 		}
 		ln, err := net.ListenUDP("udp4", ua)
 		if err != nil {
-			t.Fatal(err)
+			return nil, nil, err
 		}
 		var n atomic.Int32
 		go func() {
@@ -88,11 +76,53 @@ func TestManagerSOCKS5UDPOptInAndAssetBlockRuleDropsDatagram(t *testing.T) {
 			}
 		}()
 		t.Cleanup(func() { _ = ln.Close() })
-		return ln, &n
+		return ln, &n, nil
 	}
 
-	blockedLn, blockedCount := startEcho("127.0.0.2:0")
-	allowedLn, allowedCount := startEcho("127.0.0.1:0")
+	// Linux commonly treats the whole 127/8 range as loopback, while macOS may
+	// only have 127.0.0.1 assigned. Prefer the historical two-loopback setup and
+	// fall back to the machine's first real local IPv4 so the same block/allow
+	// security assertion still executes instead of becoming platform-skipped.
+	blockedIP, allowedIP := "127.0.0.2", "127.0.0.1"
+	blockedLn, blockedCount, err := startEcho(net.JoinHostPort(blockedIP, "0"))
+	if err != nil {
+		blockedIP = ""
+		allowedIP = "127.0.0.1"
+		addrs, addrErr := net.InterfaceAddrs()
+		if addrErr != nil {
+			t.Fatalf("enumerate local addresses after loopback-alias bind failed: %v (bind error: %v)", addrErr, err)
+		}
+		for _, addr := range addrs {
+			ip, _, parseErr := net.ParseCIDR(addr.String())
+			if parseErr == nil && ip.To4() != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+				blockedIP = ip.String()
+				break
+			}
+		}
+		if blockedIP == "" {
+			t.Fatalf("no second local IPv4 available after loopback-alias bind failed: %v", err)
+		}
+		blockedLn, blockedCount, err = startEcho(net.JoinHostPort(blockedIP, "0"))
+		if err != nil {
+			t.Fatalf("listen blocked UDP echo on %s: %v", blockedIP, err)
+		}
+	}
+	allowedLn, allowedCount, err := startEcho(net.JoinHostPort(allowedIP, "0"))
+	if err != nil {
+		t.Fatalf("listen allowed UDP echo on %s: %v", allowedIP, err)
+	}
+
+	rule, err := mOn.pg.CreateAssetInterceptRule(
+		"exact_ip",
+		blockedIP,
+		fmt.Sprintf("p41c-udp-block-%d", time.Now().UnixNano()),
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mOn.pg.DeleteAssetInterceptRule(rule.ID) })
+
 	blockedAddr := blockedLn.LocalAddr().(*net.UDPAddr)
 	allowedAddr := allowedLn.LocalAddr().(*net.UDPAddr)
 
@@ -142,7 +172,8 @@ func TestManagerSOCKS5UDPOptInAndAssetBlockRuleDropsDatagram(t *testing.T) {
 		return p
 	}
 
-	// Send datagram to blocked 127.0.0.2 (must be dropped by asset rule), then to allowed 127.0.0.1.
+	// Send one datagram to the blocked local IP (must be dropped by the asset
+	// rule), then one to the distinct allowed local IP.
 	_, _ = cliUDP.WriteToUDP(buildPkt(blockedAddr, "blocked-udp"), relayAddr)
 	_, _ = cliUDP.WriteToUDP(buildPkt(allowedAddr, "allowed-udp"), relayAddr)
 
@@ -156,25 +187,26 @@ func TestManagerSOCKS5UDPOptInAndAssetBlockRuleDropsDatagram(t *testing.T) {
 		t.Fatalf("reply = %q, want OK:allowed-udp", got)
 	}
 	if blockedCount.Load() != 0 {
-		t.Fatalf("blocked 127.0.0.2 received %d datagrams, want 0", blockedCount.Load())
+		t.Fatalf("blocked %s received %d datagrams, want 0", blockedIP, blockedCount.Load())
 	}
 	if allowedCount.Load() != 1 {
-		t.Fatalf("allowed 127.0.0.1 received %d datagrams, want 1", allowedCount.Load())
+		t.Fatalf("allowed %s received %d datagrams, want 1", allowedIP, allowedCount.Load())
 	}
 
-	// Wait briefly for SQLite writes and verify raw_udp_datagrams has 127.0.0.1 only, 0 HTTP exchanges.
+	// Wait briefly for SQLite writes and verify raw_udp_datagrams contains only
+	// the allowed host, with no row for the denied destination.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		n, err := mOn.traffic.CountRawUDPDatagrams("", "127.0.0.1")
+		n, err := mOn.traffic.CountRawUDPDatagrams("", allowedIP)
 		if err == nil && n >= 2 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if nBlocked, err := mOn.traffic.CountRawUDPDatagrams("", "127.0.0.2"); err != nil || nBlocked != 0 {
+	if nBlocked, err := mOn.traffic.CountRawUDPDatagrams("", blockedIP); err != nil || nBlocked != 0 {
 		t.Fatalf("blocked host recorded %d rows (err=%v), want 0", nBlocked, err)
 	}
-	if nAllowed, err := mOn.traffic.CountRawUDPDatagrams("", "127.0.0.1"); err != nil || nAllowed != 2 {
+	if nAllowed, err := mOn.traffic.CountRawUDPDatagrams("", allowedIP); err != nil || nAllowed != 2 {
 		t.Fatalf("allowed host recorded %d rows (err=%v), want 2", nAllowed, err)
 	}
 }

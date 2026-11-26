@@ -318,7 +318,7 @@ func TestSideClearLateWritersAndDeletedParent(t *testing.T) {
 }
 
 func TestSideTaskArchiveVersions(t *testing.T) {
-	for _, version := range []int{1, 2, 3} {
+	for version := TaskArchiveLegacyFormatVersion; version <= TaskArchiveFormatVersion; version++ {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			d, err := Open(testDSN(t))
 			if err != nil {
@@ -383,7 +383,7 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if archive.FormatVersion != 3 || archive.DataCounts["side_question_sessions"] != 2 || archive.DataCounts["side_question_requests"] != 2 {
+			if archive.FormatVersion != TaskArchiveFormatVersion || archive.DataCounts["side_question_sessions"] != 2 || archive.DataCounts["side_question_requests"] != 2 {
 				t.Fatalf("missing side archive: %+v", archive.DataCounts)
 			}
 			if err = d.CompleteTaskArchive(job.ID, archive, "/tmp/side-fixture.tar.zst", "fixture", 1, 1); err != nil {
@@ -402,11 +402,26 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 				t.Fatal(err)
 			}
 			archive.FormatVersion = version
-			if version < 3 {
+			if version < taskArchiveSideQuestionFormatVersion {
 				delete(archive.Tables, "side_question_sessions")
 				delete(archive.Tables, "side_question_requests")
 				delete(archive.DataCounts, "side_question_sessions")
 				delete(archive.DataCounts, "side_question_requests")
+			}
+			// Duo-lead supervision was introduced by archive format v4. A
+			// genuine v1-v3 manifest has none of these keys; remove the empty
+			// tables from the current snapshot so every legacy branch exercises
+			// the same missing-table/default path used for old packages.
+			if version < taskArchiveSupervisionFormatVersion {
+				for _, table := range []string{
+					"task_supervisor_config",
+					"supervisor_rounds",
+					"supervisor_reviews",
+					"supervisor_decisions",
+				} {
+					delete(archive.Tables, table)
+					delete(archive.DataCounts, table)
+				}
 			}
 			if _, err = d.RestoreTaskArchive(job.ID, archive, 0); err != nil {
 				t.Fatal(err)
@@ -416,7 +431,7 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if version < 3 {
+				if version < taskArchiveSideQuestionFormatVersion {
 					if got != nil {
 						t.Fatal("legacy archive fabricated snapshot")
 					}

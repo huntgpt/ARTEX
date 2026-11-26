@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/Autumn-27/artex/db"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/miekg/dns"
+	"github.com/projectdiscovery/dnsx/libs/dnsx"
 )
 
 // ---------------------------------------------------------------------------
@@ -468,33 +471,81 @@ func TestDoDNSIntegration(t *testing.T) {
 	e.doDNS(1, "example.com")
 }
 
+// testResolver returns a dnsx client backed only by a loopback DNS server. Keep
+// the enrich unit suite hermetic: using dnsx.DefaultResolvers here used to make
+// every `go test ./...` binary contact public resolvers (and repeatedly prompt
+// host firewalls because Go gives each temporary test binary a new identity).
 func testResolver(t *testing.T) *Engine {
 	t.Helper()
-	e := New(nil, nil, 0)
-	e.Close()
-	if e.resolv == nil {
-		t.Skip("dnsx resolver not available")
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	return e
+
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		for _, q := range req.Question {
+			if strings.EqualFold(q.Name, "query-error.test.") {
+				resp.Rcode = dns.RcodeNameError
+				continue
+			}
+			switch q.Qtype {
+			case dns.TypeA:
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+					A:   net.ParseIP("192.0.2.10"),
+				})
+			case dns.TypeAAAA:
+				resp.Answer = append(resp.Answer, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60},
+					AAAA: net.ParseIP("2001:db8::10"),
+				})
+			case dns.TypeCNAME:
+				resp.Answer = append(resp.Answer, &dns.CNAME{
+					Hdr:    dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
+					Target: "canonical.test.",
+				})
+			}
+		}
+		_ = w.WriteMsg(resp)
+	})
+	server := &dns.Server{PacketConn: pc, Handler: handler}
+	go func() { _ = server.ActivateAndServe() }()
+	t.Cleanup(func() { _ = server.Shutdown() })
+
+	resolver, err := dnsx.New(dnsx.Options{
+		BaseResolvers: []string{"udp:" + pc.LocalAddr().String()},
+		MaxRetries:    1,
+		QuestionTypes: []uint16{dns.TypeA, dns.TypeAAAA, dns.TypeCNAME},
+		Timeout:       500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Engine{
+		resolv: resolver,
+		jobs:   make(chan job, queueSize),
+		closed: make(chan struct{}),
+	}
 }
 
 func TestDoDNSWithResolverDeadDB(t *testing.T) {
 	e := testResolver(t)
 	e.as = deadAssetStore(t)
-	e.doDNS(1, "example.com")
+	e.doDNS(1, "records.test")
 }
 
 func TestDoDNSQueryError(t *testing.T) {
 	e := testResolver(t)
 	e.as = deadAssetStore(t)
-	e.doDNS(1, "this-domain-does-not-exist-artex-test.example")
+	e.doDNS(1, "query-error.test")
 }
 
 func TestDoDNSCNAME(t *testing.T) {
 	e := testResolver(t)
 	e.as = deadAssetStore(t)
-	// www.github.com typically returns a CNAME record.
-	e.doDNS(1, "www.github.com")
+	e.doDNS(1, "cname.test")
 }
 
 // ---------------------------------------------------------------------------

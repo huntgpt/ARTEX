@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
@@ -138,9 +139,9 @@ func TestIngestScanOutputJSONPG(t *testing.T) {
 	tsx.SetAssetStore(d.Assets(), d.Companies())
 	dir := t.TempDir()
 	tool := tsx.ingestScanOutput()
-	formats := map[string]string{"nuclei-jsonl": nucleiFixture, "httpx-jsonl": httpxFixture, "gowitness-jsonl": gowitnessFixture, "ffuf-json": ffufFixture}
-	wantFacts := map[string]float64{"nuclei-jsonl": 2, "httpx-jsonl": 2, "gowitness-jsonl": 1, "ffuf-json": 2}
-	wantAssets := map[string]float64{"nuclei-jsonl": 2, "httpx-jsonl": 2, "gowitness-jsonl": 1, "ffuf-json": 2}
+	formats := map[string]string{"ct-json": ctFixture, "dns-jsonl": dnsFixture, "nuclei-jsonl": nucleiFixture, "httpx-jsonl": httpxFixture, "gowitness-jsonl": gowitnessFixture, "ffuf-json": ffufFixture}
+	wantFacts := map[string]float64{"ct-json": 2, "dns-jsonl": 2, "nuclei-jsonl": 2, "httpx-jsonl": 2, "gowitness-jsonl": 1, "ffuf-json": 2}
+	wantAssets := map[string]float64{"ct-json": 2, "dns-jsonl": 3, "nuclei-jsonl": 2, "httpx-jsonl": 2, "gowitness-jsonl": 1, "ffuf-json": 2}
 	ingest := func(format string) map[string]any {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(dir, format+".out"), []byte(formats[format]), 0o600); err != nil {
@@ -179,12 +180,15 @@ func TestIngestScanOutputJSONPG(t *testing.T) {
 		}
 	}
 	assets, facts := state()
-	if facts != 7 || assets == 0 {
-		t.Fatalf("%d assets and %d facts after the first ingestion, want some assets and 7 facts", assets, facts)
+	if facts != 11 || assets == 0 {
+		t.Fatalf("%d assets and %d facts after the first ingestion, want some assets and 11 facts", assets, facts)
 	}
 	var n int
 	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE url LIKE '%evil%' OR domain LIKE '%evil%'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("%d assets from target text (%v)", n, err)
+	}
+	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE domain='hermes.scan-ingest.example.com' AND $1 = ANY(task_ids)`, task.ID).Scan(&n); err != nil || n == 0 {
+		t.Fatalf("certificate-transparency/DNS asset was not linked to task %d (%v)", task.ID, err)
 	}
 	for format := range formats {
 		out := ingest(format)
@@ -199,6 +203,97 @@ func TestIngestScanOutputJSONPG(t *testing.T) {
 	}
 	if a, f := state(); a != assets || f != facts {
 		t.Fatalf("re-ingestion: %d assets and %d facts, first run %d and %d", a, f, assets, facts)
+	}
+}
+
+func TestIngestScanOutputCreatesIdempotentCandidateFollowupsPG(t *testing.T) {
+	d := testDB(t)
+	t.Cleanup(func() { _ = d.Close() })
+	task, err := d.CreateTaskWithOptions("scan candidate escalation", "scan-ingest.example.com", db.TaskCreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = d.DeleteTask(task.ID)
+		_, _ = d.Exec(`DELETE FROM assets WHERE domain LIKE '%scan-ingest.example.com' OR url LIKE '%scan-ingest.example.com%'`)
+	})
+	store := d.Exploration(task.ExplorationID)
+	tsx := NewToolSet(store, "worker-1")
+	tsx.SetTaskID(task.ID)
+	tsx.SetAssetStore(d.Assets(), d.Companies())
+	dir := t.TempDir()
+	tool := tsx.ingestScanOutput()
+	ingest := func(name, format, content string) map[string]any {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		in, _ := json.Marshal(map[string]string{"format": format, "path": name})
+		res, callErr := tool.Call(context.Background(), in, &actool.ToolContext{WorkingDir: dir})
+		var out map[string]any
+		if callErr != nil || res.IsError || json.Unmarshal([]byte(res.Flatten()), &out) != nil {
+			t.Fatalf("%s: %v %s", format, callErr, res.Flatten())
+		}
+		return out
+	}
+
+	first := ingest("secrets.jsonl", "trufflehog-jsonl", truffleHogFixture)
+	if first["followup_intents"] == nil {
+		t.Fatalf("TruffleHog did not create a follow-up: %v", first)
+	}
+	second := ingest("secrets.jsonl", "trufflehog-jsonl", truffleHogFixture)
+	if second["followup_intents"] == nil {
+		t.Fatalf("repeat TruffleHog ingestion lost follow-up identity: %v", second)
+	}
+	ctFirst := ingest("ct.json", "ct-json", ctFixture)
+	if ctFirst["followup_intents"] == nil {
+		t.Fatalf("certificate-transparency ingestion did not create batch coverage work: %v", ctFirst)
+	}
+	ctSecond := ingest("ct.json", "ct-json", ctFixture)
+	if ctSecond["followup_intents"] == nil {
+		t.Fatalf("repeat certificate-transparency ingestion lost follow-up identity: %v", ctSecond)
+	}
+	anomaly := `{"url":"https://scan-ingest.example.com/","status_code":200,"title":"home pg5 ฝาก 1 รับ 50 now"}` + "\n"
+	web := ingest("web.jsonl", "httpx-jsonl", anomaly)
+	if web["followup_intents"] == nil {
+		t.Fatalf("content anomaly did not create a follow-up: %v", web)
+	}
+	intents, err := store.ListByKind(db.KindIntent, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intents) != 5 {
+		t.Fatalf("follow-up intents=%d want 5: %+v", len(intents), intents)
+	}
+	foundJS := false
+	foundCT := false
+	for _, intent := range intents {
+		payload := string(intent.Payload)
+		if intent.Origin != "scanner_escalator" || strings.Contains(payload, "ฝาก 1 รับ") {
+			t.Fatalf("unsafe or malformed automated follow-up: %+v", intent)
+		}
+		switch {
+		case strings.Contains(payload, "scan:httpx:javascript-api-discovery:"):
+			if intent.Priority != 8 {
+				t.Fatalf("JavaScript/API follow-up priority=%d want 8", intent.Priority)
+			}
+			foundJS = true
+		case strings.Contains(payload, "scan:ct:dns-http-coverage:"):
+			if intent.Priority != 8 || !strings.Contains(payload, "ownership") || !strings.Contains(payload, "task-scope") {
+				t.Fatalf("CT batch follow-up is not gated or bounded: %+v", intent)
+			}
+			foundCT = true
+		default:
+			if intent.Priority != 10 {
+				t.Fatalf("incident/secret follow-up priority=%d want 10: %+v", intent.Priority, intent)
+			}
+		}
+	}
+	if !foundJS {
+		t.Fatal("HTML application did not create a JavaScript/API discovery follow-up")
+	}
+	if !foundCT {
+		t.Fatal("certificate-transparency ingestion did not create gated batch coverage work")
 	}
 }
 

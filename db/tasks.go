@@ -62,6 +62,9 @@ type Task struct {
 	// situation view (the scope field is still kept). company associations (task_scope kind=company)
 	// are unrelated to this switch and never affected. See db/task_scope.go.
 	CoverageEnabled bool `json:"coverage_enabled"`
+	// Supervisor is the task's stable project-lead topology. It is advisory;
+	// the canonical Planner remains the sole intent writer.
+	Supervisor TaskSupervisorConfig `json:"supervisor"`
 }
 
 // TaskDeleteResult reports optional related-data cleanup performed in the same
@@ -179,6 +182,8 @@ type TaskCreateOptions struct {
 	LLMRotate *bool
 	// TargetGate opts the task into the approval gate for asset targets; nil = off.
 	TargetGate *bool
+	// Supervisor enables stable single/dual project leads. nil = off.
+	Supervisor *TaskSupervisorConfig
 }
 
 // CreateTaskWithOptions creates an exploration, task, direct source relations,
@@ -274,6 +279,11 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs); err != nil {
 		return nil, err
 	}
+	supervisor, err := insertTaskSupervisorConfig(tx, t.ID, opts.Supervisor)
+	if err != nil {
+		return nil, err
+	}
+	t.Supervisor = supervisor
 	if err := insertTaskInterceptRules(tx, t.ID, opts.InterceptRules); err != nil {
 		return nil, err
 	}

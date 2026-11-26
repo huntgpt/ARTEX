@@ -136,6 +136,8 @@ import type {
   TaskArchive,
   TaskArchiveState,
   TaskCategory,
+  TaskSupervisorCheckpointPolicy,
+  TaskSupervisorMode,
   TaskStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -3180,6 +3182,11 @@ function CreateTaskSheet({
   const [companyIDs, setCompanyIDs] = React.useState<number[]>([]);
   const [llmProfileIDs, setLLMProfileIDs] = React.useState<string[]>([]);
   const [llmRotate, setLLMRotate] = React.useState(false);
+  const [supervisorMode, setSupervisorMode] = React.useState<TaskSupervisorMode>("off");
+  const [primaryLeadProfileID, setPrimaryLeadProfileID] = React.useState("");
+  const [secondaryLeadProfileID, setSecondaryLeadProfileID] = React.useState("");
+  const [supervisorCheckpointPolicy, setSupervisorCheckpointPolicy] =
+    React.useState<TaskSupervisorCheckpointPolicy>("strategic");
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // task-level timeout (minutes); empty/0 = no limit
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner heartbeat (minutes); default 10, minimum 10 (matching the backend)
@@ -3237,6 +3244,18 @@ function CreateTaskSheet({
       toast.error(t("Link up to {count} source tasks", { count: MAX_SOURCE_TASKS }));
       return;
     }
+    if (supervisorMode !== "off" && !primaryLeadProfileID) {
+      toast.error(t("Select a primary AI project lead"));
+      return;
+    }
+    if (supervisorMode === "dual" && !secondaryLeadProfileID) {
+      toast.error(t("Select a secondary AI project lead"));
+      return;
+    }
+    if (supervisorMode === "dual" && primaryLeadProfileID === secondaryLeadProfileID) {
+      toast.error(t("Primary and secondary project leads must use different LLM profiles"));
+      return;
+    }
     setCreating(true);
     try {
       const timeoutSec = Math.max(0, Math.floor(Number(timeoutMin) || 0)) * 60;
@@ -3260,6 +3279,13 @@ function CreateTaskSheet({
         credentials: credentials
           .map((c) => ({ domain: c.domain.trim(), username: c.username.trim(), password: c.password, note: c.note?.trim() ?? "" }))
           .filter((c) => c.domain !== "" && c.username !== ""),
+        supervisor: {
+          mode: supervisorMode,
+          primary_profile_id: supervisorMode === "off" ? undefined : Number(primaryLeadProfileID),
+          secondary_profile_id: supervisorMode === "dual" ? Number(secondaryLeadProfileID) : undefined,
+          checkpoint_policy: supervisorCheckpointPolicy,
+          revision: 1,
+        },
       });
       toast.success(t("Task created"));
       setName("");
@@ -3271,6 +3297,10 @@ function CreateTaskSheet({
       setCompanyIDs([]);
       setLLMProfileIDs([]);
       setLLMRotate(false);
+      setSupervisorMode("off");
+      setPrimaryLeadProfileID("");
+      setSecondaryLeadProfileID("");
+      setSupervisorCheckpointPolicy("strategic");
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
@@ -3443,6 +3473,85 @@ function CreateTaskSheet({
               />
               <FieldDescription>
                 {t("Reorder profiles to choose worker rotation order or failover priority. Saving the chain resets exhausted profiles.")}
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel>{t("AI project supervision")}</FieldLabel>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="supervisor-mode">{t("Lead topology")}</Label>
+                  <Select
+                    value={supervisorMode}
+                    onValueChange={(value) => setSupervisorMode(value as TaskSupervisorMode)}
+                  >
+                    <SelectTrigger id="supervisor-mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="off">{t("Off — Planner only")}</SelectItem>
+                      <SelectItem value="single">{t("Single project lead")}</SelectItem>
+                      <SelectItem value="dual">{t("Duo Lead — independent review")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="supervisor-checkpoint">{t("Review cadence")}</Label>
+                  <Select
+                    value={supervisorCheckpointPolicy}
+                    onValueChange={(value) => setSupervisorCheckpointPolicy(value as TaskSupervisorCheckpointPolicy)}
+                    disabled={supervisorMode === "off"}
+                  >
+                    <SelectTrigger id="supervisor-checkpoint">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="strategic">{t("Strategic events")}</SelectItem>
+                      <SelectItem value="every_round">{t("Every Planner round")}</SelectItem>
+                      <SelectItem value="manual">{t("Manual only")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {supervisorMode !== "off" ? (
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="primary-project-lead">{t("Primary project lead")}</Label>
+                    <Select value={primaryLeadProfileID} onValueChange={setPrimaryLeadProfileID}>
+                      <SelectTrigger id="primary-project-lead">
+                        <SelectValue placeholder={t("Select provider/account")} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {profiles.map((profile) => (
+                          <SelectItem key={profile.id} value={profile.id}>
+                            {profile.name} · {profile.format} / {profile.model}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : null}
+                {supervisorMode === "dual" ? (
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="secondary-project-lead">{t("Secondary project lead")}</Label>
+                    <Select value={secondaryLeadProfileID} onValueChange={setSecondaryLeadProfileID}>
+                      <SelectTrigger id="secondary-project-lead">
+                        <SelectValue placeholder={t("Select a different provider/account")} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {profiles
+                          .filter((profile) => profile.id !== primaryLeadProfileID)
+                          .map((profile) => (
+                            <SelectItem key={profile.id} value={profile.id}>
+                              {profile.name} · {profile.format} / {profile.model}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : null}
+              </div>
+              <FieldDescription>
+                {t(
+                  "Project leads independently inspect the same persisted task snapshot. The Arbiter merges their advice, then the canonical Planner alone creates prerequisite-aware Worker intents.",
+                )}
               </FieldDescription>
             </Field>
             <Field>

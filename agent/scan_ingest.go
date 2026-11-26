@@ -41,7 +41,86 @@ type scanIngest struct {
 	Facts                                      []factItem
 	Secrets                                    []db.DiscoveredSecretInput
 	BrowserScreenshots                         []browserScreenshotCandidate
+	ContentAnomalies                           []webContentAnomaly
+	WebApplications                            []webApplicationCandidate
 	Notable                                    map[string][]string
+}
+
+type webContentAnomaly struct {
+	Host string
+	URL  string
+}
+
+type webApplicationCandidate struct {
+	Host   string
+	Origin string
+}
+
+// webApplicationCandidateMax bounds automated follow-up fan-out from a single
+// scanner file. Only responses with an HTML signal are candidates, so this is
+// a safety backstop rather than the primary filter.
+const webApplicationCandidateMax = 50
+
+// suspiciousWebTitle is deliberately narrow: it promotes likely compromise,
+// defacement, or gambling content to a validation intent without treating every
+// ordinary title change as a vulnerability. The title itself remains untrusted
+// data and is never copied into an agent instruction.
+func suspiciousWebTitle(title string) bool {
+	title = strings.ToLower(strings.TrimSpace(title))
+	for _, marker := range []string{
+		"casino", "betting", "sportsbook", "slot gacor", "บาคาร่า", "สล็อตออนไลน์",
+		"เว็บพนัน", "pg5", "ฝาก 1 รับ", "hacked by", "defaced by",
+	} {
+		if strings.Contains(title, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *scanIngest) noteContentAnomaly(host, rawURL, title string) {
+	if !suspiciousWebTitle(title) || host == "" {
+		return
+	}
+	for _, item := range s.ContentAnomalies {
+		if item.Host == host {
+			return
+		}
+	}
+	s.ContentAnomalies = append(s.ContentAnomalies, webContentAnomaly{Host: host, URL: rawURL})
+}
+
+func (s *scanIngest) noteWebApplication(host, rawURL string, status int, title, contentType string, tech []string) {
+	if host == "" || status < 200 || status >= 400 {
+		return
+	}
+	htmlSignal := strings.Contains(strings.ToLower(contentType), "text/html") || strings.TrimSpace(title) != ""
+	if !htmlSignal {
+		for _, name := range tech {
+			switch strings.ToLower(strings.TrimSpace(name)) {
+			case "react", "angular", "vue.js", "vue", "next.js", "nuxt.js", "svelte", "webpack", "vite":
+				htmlSignal = true
+			}
+		}
+	}
+	if !htmlSignal {
+		return
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return
+	}
+	origin := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	for _, item := range s.WebApplications {
+		if item.Origin == origin {
+			return
+		}
+	}
+	if len(s.WebApplications) >= webApplicationCandidateMax {
+		s.Truncated = true
+		return
+	}
+	s.WebApplications = append(s.WebApplications, webApplicationCandidate{Host: host, Origin: origin})
 }
 
 type browserScreenshotCandidate struct {
@@ -137,6 +216,139 @@ func scanHostOf(s string) string {
 		return scanHost(h)
 	}
 	return scanHost(s)
+}
+
+// ---- certificate-transparency JSON (crt.sh output=json) ----
+
+type ctJSONResult struct {
+	NameValue string `json:"name_value"`
+}
+
+// readCTJSON streams the crt.sh JSON array. A certificate may carry several
+// newline-delimited DNS names; wildcards are normalized to their concrete
+// suffix and duplicate names are emitted once.
+func readCTJSON(r io.Reader, s *scanIngest) error {
+	dec := json.NewDecoder(r)
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '[' {
+		return errors.New("certificate-transparency JSON must be an array")
+	}
+	for dec.More() {
+		var item ctJSONResult
+		if err := dec.Decode(&item); err != nil {
+			if s.Events > 0 {
+				s.Truncated = true
+				return nil
+			}
+			return err
+		}
+		s.Events++
+		for _, rawName := range strings.Split(item.NameValue, "\n") {
+			name := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(rawName)), "*.")
+			name = scanHost(name)
+			if name == "" || net.ParseIP(name) != nil || s.hosts[name] {
+				continue
+			}
+			if s.full() {
+				continue
+			}
+			s.hosts[name] = true
+			s.Assets = append(s.Assets, assetInputItem{Type: "subdomain", Domain: name})
+			s.note("subdomains", name)
+			s.fact(fmt.Sprintf("certificate transparency observed hostname %s", name), map[string]any{"hostname": name})
+		}
+	}
+	_, err = dec.Token()
+	return err
+}
+
+// ---- DNS JSONL ({name,A,AAAA,CNAME}) ----
+
+type dnsJSONResult struct {
+	Name  string          `json:"name"`
+	A     json.RawMessage `json:"A"`
+	AAAA  json.RawMessage `json:"AAAA"`
+	CNAME json.RawMessage `json:"CNAME"`
+}
+
+func scanStringList(raw json.RawMessage) []string {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	var list []string
+	if json.Unmarshal(raw, &list) == nil {
+		return list
+	}
+	var single string
+	if json.Unmarshal(raw, &single) == nil && single != "" {
+		return []string{single}
+	}
+	return nil
+}
+
+func validDNSValues(recordType string, raw json.RawMessage) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, candidate := range scanStringList(raw) {
+		candidate = strings.TrimSpace(candidate)
+		switch recordType {
+		case "A", "AAAA":
+			ip := net.ParseIP(candidate)
+			if ip == nil || recordType == "A" && ip.To4() == nil || recordType == "AAAA" && ip.To4() != nil {
+				continue
+			}
+			candidate = ip.String()
+		case "CNAME":
+			candidate = scanHost(candidate)
+			if candidate == "" || net.ParseIP(candidate) != nil {
+				continue
+			}
+		}
+		if !seen[candidate] {
+			seen[candidate] = true
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func (s *scanIngest) addDNSJSON(line []byte) {
+	if s.full() {
+		return
+	}
+	var item dnsJSONResult
+	if json.Unmarshal(line, &item) != nil {
+		s.Skipped++
+		return
+	}
+	name := scanHost(item.Name)
+	if name == "" || net.ParseIP(name) != nil {
+		s.Skipped++
+		return
+	}
+	s.Events++
+	s.hosts[name] = true
+	records := map[string][]string{
+		"A": validDNSValues("A", item.A), "AAAA": validDNSValues("AAAA", item.AAAA), "CNAME": validDNSValues("CNAME", item.CNAME),
+	}
+	added := false
+	for _, recordType := range []string{"A", "AAAA", "CNAME"} {
+		values := records[recordType]
+		if len(values) == 0 {
+			continue
+		}
+		added = true
+		s.Assets = append(s.Assets, assetInputItem{Type: "subdomain", Domain: name, RecordType: recordType, RecordValue: values})
+	}
+	if !added {
+		s.Assets = append(s.Assets, assetInputItem{Type: "subdomain", Domain: name})
+	}
+	s.note("dns", name)
+	s.fact(fmt.Sprintf("DNS resolution collected for %s", name), map[string]any{"name": name, "A": records["A"], "AAAA": records["AAAA"], "CNAME": records["CNAME"]})
 }
 
 // ---- nmap -oX ----
@@ -383,6 +595,7 @@ type httpxResult struct {
 	URL           string          `json:"url"`
 	StatusCode    int             `json:"status_code"`
 	Title         string          `json:"title"`
+	ContentType   string          `json:"content_type"`
 	Tech          []string        `json:"tech"`
 	Webserver     string          `json:"webserver"`
 	ContentLength int64           `json:"content_length"`
@@ -422,6 +635,8 @@ func (s *scanIngest) addHttpx(line []byte) {
 		item.ContentLength = &r.ContentLength
 	}
 	s.Assets = append(s.Assets, item)
+	s.noteContentAnomaly(host, u, r.Title)
+	s.noteWebApplication(host, u, r.StatusCode, r.Title, r.ContentType, r.Tech)
 	s.note("urls", fmt.Sprintf("%s %d", u, r.StatusCode))
 	s.fact(fmt.Sprintf("httpx: %s responded with status %d", u, r.StatusCode),
 		map[string]any{"title": r.Title, "tech": r.Tech, "webserver": r.Webserver, "content_length": r.ContentLength,
@@ -514,6 +729,7 @@ func (s *scanIngest) addGowitness(line []byte) {
 		asset.ContentLength = &r.ContentLength
 	}
 	s.Assets = append(s.Assets, asset)
+	s.noteContentAnomaly(host, final, r.Title)
 	s.note("screenshots", fmt.Sprintf("%s %d", final, r.ResponseCode))
 	s.BrowserScreenshots = append(s.BrowserScreenshots, browserScreenshotCandidate{
 		FileName: fileName, SourceURL: final, CapturedAt: r.ProbedAt,

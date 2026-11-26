@@ -9,7 +9,9 @@ import {
   CheckIcon,
   ClockIcon,
   CoinsIcon,
+  GitMergeIcon,
   ListChecksIcon,
+  Loader2Icon,
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -17,6 +19,7 @@ import {
   ShieldCheckIcon,
   TargetIcon,
   Trash2Icon,
+  UsersIcon,
   XIcon,
 } from "lucide-react";
 
@@ -25,6 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
@@ -37,6 +41,7 @@ import type {
   AssetInterceptKind,
   AssetInterceptRule,
   Finding,
+  LLMProfile,
   ModelTokenStat,
   NewAssetType,
   RedTeamPhaseRun,
@@ -46,6 +51,10 @@ import type {
   TaskGoal,
   TaskNode,
   TaskScopeRow,
+  TaskSupervisorCheckpointPolicy,
+  TaskSupervisorConfig,
+  TaskSupervisorMode,
+  SupervisorRound,
 } from "@/lib/types";
 
 // Compact token count formatting (12345 → 12.3k, 2000000 → 2M).
@@ -59,6 +68,17 @@ function fmtTokens(n: number): string {
 function cacheHitRate(cacheRead: number, input: number): string {
   if (input <= 0) return "—";
   return Math.round((cacheRead / input) * 100) + "%";
+}
+
+function intentLabel(intent: TaskNode): string {
+  if (!intent.payload) return t("Intent #{id}", { id: intent.id });
+  try {
+    const payload = JSON.parse(intent.payload) as { summary?: unknown };
+    if (typeof payload.summary === "string" && payload.summary.trim()) return payload.summary.trim();
+  } catch {
+    // Some legacy nodes contain plain text rather than an object.
+  }
+  return intent.payload.trim() || t("Intent #{id}", { id: intent.id });
 }
 
 // Display value of one test-scope row: domain / CIDR / company.
@@ -117,6 +137,14 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   const [findings, setFindings] = React.useState<Finding[]>([]);
   const [recentActivity, setRecentActivity] = React.useState<Activity[]>([]);
   const [workflow, setWorkflow] = React.useState<RedTeamPhaseRun[]>([]);
+  const [supervisorConfig, setSupervisorConfig] = React.useState<TaskSupervisorConfig | null>(null);
+  const [supervisorDraft, setSupervisorDraft] = React.useState<TaskSupervisorConfig | null>(null);
+  const [supervisorRounds, setSupervisorRounds] = React.useState<SupervisorRound[]>([]);
+  const [supervisorProfiles, setSupervisorProfiles] = React.useState<LLMProfile[]>([]);
+  const [supervisorBusy, setSupervisorBusy] = React.useState(false);
+  const [supervisorError, setSupervisorError] = React.useState("");
+  const [workerCapacity, setWorkerCapacity] = React.useState(3);
+  const supervisorDraftDirty = React.useRef(false);
   const [coverage, setCoverage] = React.useState<{
     enabled: boolean;
     scope_rows: number;
@@ -246,6 +274,87 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     }
   }, [taskId]);
 
+  const loadSupervisorState = React.useCallback(
+    async (replaceDraft = false) => {
+      try {
+        const [config, rounds] = await Promise.all([
+          api.taskSupervisor(taskId),
+          api.taskSupervisorRounds(taskId, 10),
+        ]);
+        setSupervisorConfig(config);
+        setSupervisorRounds(rounds.items);
+        if (replaceDraft || !supervisorDraftDirty.current) {
+          setSupervisorDraft(config);
+          supervisorDraftDirty.current = false;
+        }
+        setSupervisorError("");
+      } catch (error) {
+        setSupervisorError(error instanceof Error ? error.message : t("Failed to load project supervision"));
+      }
+    },
+    [taskId],
+  );
+
+  const changeSupervisorDraft = (patch: Partial<TaskSupervisorConfig>) => {
+    supervisorDraftDirty.current = true;
+    setSupervisorDraft((current) => ({
+      mode: "off",
+      checkpoint_policy: "strategic",
+      revision: 1,
+      ...current,
+      ...patch,
+    }));
+  };
+
+  const saveSupervisor = async () => {
+    if (!supervisorDraft) return;
+    if (supervisorDraft.mode !== "off" && !supervisorDraft.primary_profile_id) {
+      setSupervisorError(t("Select a primary AI project lead"));
+      return;
+    }
+    if (supervisorDraft.mode === "dual" && !supervisorDraft.secondary_profile_id) {
+      setSupervisorError(t("Select a secondary AI project lead"));
+      return;
+    }
+    if (
+      supervisorDraft.mode === "dual" &&
+      supervisorDraft.primary_profile_id === supervisorDraft.secondary_profile_id
+    ) {
+      setSupervisorError(t("Primary and secondary project leads must use different LLM profiles"));
+      return;
+    }
+    setSupervisorBusy(true);
+    setSupervisorError("");
+    try {
+      const saved = await api.setTaskSupervisor(taskId, {
+        ...supervisorDraft,
+        primary_profile_id: supervisorDraft.mode === "off" ? undefined : supervisorDraft.primary_profile_id,
+        secondary_profile_id: supervisorDraft.mode === "dual" ? supervisorDraft.secondary_profile_id : undefined,
+      });
+      supervisorDraftDirty.current = false;
+      setSupervisorConfig(saved);
+      setSupervisorDraft(saved);
+      await loadSupervisorState(true);
+    } catch (error) {
+      setSupervisorError(error instanceof Error ? error.message : t("Failed to save project supervision"));
+    } finally {
+      setSupervisorBusy(false);
+    }
+  };
+
+  const runSupervisorReview = async () => {
+    setSupervisorBusy(true);
+    setSupervisorError("");
+    try {
+      await api.runTaskSupervisor(taskId);
+      await loadSupervisorState(true);
+    } catch (error) {
+      setSupervisorError(error instanceof Error ? error.message : t("Project-lead review failed"));
+    } finally {
+      setSupervisorBusy(false);
+    }
+  };
+
   const addConstraint = async () => {
     const text = conText.trim();
     if (!text) return;
@@ -360,6 +469,25 @@ export function OverviewTab({ taskId }: { taskId: string }) {
 
   React.useEffect(() => {
     let cancelled = false;
+    Promise.all([api.llmProfiles(), api.settings()])
+      .then(([profiles, settings]) => {
+        if (cancelled) return;
+        setSupervisorProfiles(profiles);
+        if (settings.workers && settings.workers > 0) setWorkerCapacity(settings.workers);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSupervisorProfiles([]);
+          setWorkerCapacity(3);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
     let loading = false;
 
     const load = async () => {
@@ -415,21 +543,27 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     void loadTokens();
     void loadGoals();
     void loadConstraints();
+    void loadSupervisorState(true);
     const stopPolling = setVisibleInterval(() => {
       void load();
       void loadTokens();
       void loadGoals();
       void loadConstraints();
+      void loadSupervisorState(false);
     }, 3000);
     return () => {
       cancelled = true;
       stopPolling();
     };
-  }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints]);
+  }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints, loadSupervisorState]);
 
   const running = intents.filter((i) => i.state === "running");
   const open = intents.filter((i) => i.state === "open");
   const blocked = intents.filter((i) => i.state === "blocked");
+  const workerLanes = Array.from({ length: workerCapacity }, (_, index) => {
+    const owner = `work#${index + 1}`;
+    return { owner, intent: running.find((item) => item.owner === owner) };
+  });
   const taskFindings = findings.filter((f) => f.task_id === taskId);
   const goalsPct = task?.goals_total ? Math.round(((task.goals_met ?? 0) / task.goals_total) * 100) : 0;
   const executionActivity = recentActivity
@@ -442,6 +576,17 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       latestByIntent.set(activity.intent_id, activity);
     }
   }
+  const latestSupervisorRound = supervisorRounds[0];
+  const profileLabel = (profileID?: number) => {
+    if (!profileID) return t("Unavailable");
+    const profile = supervisorProfiles.find((item) => Number(item.id) === profileID);
+    return profile ? `${profile.name} · ${profile.format} / ${profile.model}` : t("Profile #{id}", { id: profileID });
+  };
+  const latestSupervisorDecisionSummary =
+    latestSupervisorRound?.decision?.rationale ||
+    (typeof latestSupervisorRound?.decision?.decision?.consensus_summary === "string"
+      ? latestSupervisorRound.decision.decision.consensus_summary
+      : "");
   // Token totals (across all models) for the card header overview.
   const tokenTotals = modelTokens.reduce(
     (acc, m) => {
@@ -473,6 +618,192 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             <div className="text-xs font-medium text-muted-foreground">{t("Goal")}</div>
             <p className="text-sm whitespace-pre-wrap break-words">{task?.goal?.trim() || "—"}</p>
           </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader className="gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <CardTitle className="flex flex-wrap items-center gap-2 text-base">
+              <UsersIcon className="size-4 text-violet-500" /> {t("AI project supervision")}
+              <Badge variant={supervisorConfig?.mode === "off" || !supervisorConfig ? "secondary" : "outline"}>
+                {supervisorConfig?.mode === "dual"
+                  ? t("Duo Lead")
+                  : supervisorConfig?.mode === "single"
+                    ? t("Single Lead")
+                    : t("Off")}
+              </Badge>
+              {latestSupervisorRound ? (
+                <Badge variant={latestSupervisorRound.state === "failed" ? "destructive" : "outline"}>
+                  {latestSupervisorRound.state}
+                </Badge>
+              ) : null}
+            </CardTitle>
+            <CardDescription>
+              {t(
+                "Independent leads inspect one immutable snapshot, the Arbiter merges their advice, and only the canonical Planner can create Worker intents.",
+              )}
+            </CardDescription>
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={supervisorBusy || !supervisorConfig || supervisorConfig.mode === "off"}
+              onClick={() => void runSupervisorReview()}
+            >
+              {supervisorBusy ? <Loader2Icon className="animate-spin" /> : <GitMergeIcon />}
+              {t("Run review now")}
+            </Button>
+            <Button size="sm" disabled={supervisorBusy || !supervisorDraft} onClick={() => void saveSupervisor()}>
+              {supervisorBusy ? <Loader2Icon className="animate-spin" /> : null}
+              {t("Save supervision")}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid min-w-0 gap-1.5">
+              <Label htmlFor="task-supervisor-mode">{t("Lead topology")}</Label>
+              <NativeSelect
+                id="task-supervisor-mode"
+                value={supervisorDraft?.mode ?? "off"}
+                disabled={supervisorBusy}
+                onChange={(event) =>
+                  changeSupervisorDraft({ mode: event.target.value as TaskSupervisorMode })
+                }
+              >
+                <NativeSelectOption value="off">{t("Off — Planner only")}</NativeSelectOption>
+                <NativeSelectOption value="single">{t("Single project lead")}</NativeSelectOption>
+                <NativeSelectOption value="dual">{t("Duo Lead")}</NativeSelectOption>
+              </NativeSelect>
+            </div>
+            <div className="grid min-w-0 gap-1.5">
+              <Label htmlFor="task-supervisor-primary">{t("Primary lead")}</Label>
+              <NativeSelect
+                id="task-supervisor-primary"
+                value={String(supervisorDraft?.primary_profile_id ?? "")}
+                disabled={supervisorBusy || !supervisorDraft || supervisorDraft.mode === "off"}
+                onChange={(event) =>
+                  changeSupervisorDraft({ primary_profile_id: Number(event.target.value) || undefined })
+                }
+              >
+                <NativeSelectOption value="">{t("Select provider/account")}</NativeSelectOption>
+                {supervisorProfiles.map((profile) => (
+                  <NativeSelectOption key={profile.id} value={profile.id}>
+                    {profile.name} · {profile.format} / {profile.model}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </div>
+            <div className="grid min-w-0 gap-1.5">
+              <Label htmlFor="task-supervisor-secondary">{t("Secondary lead")}</Label>
+              <NativeSelect
+                id="task-supervisor-secondary"
+                value={String(supervisorDraft?.secondary_profile_id ?? "")}
+                disabled={supervisorBusy || !supervisorDraft || supervisorDraft.mode !== "dual"}
+                onChange={(event) =>
+                  changeSupervisorDraft({ secondary_profile_id: Number(event.target.value) || undefined })
+                }
+              >
+                <NativeSelectOption value="">{t("Select a different provider/account")}</NativeSelectOption>
+                {supervisorProfiles
+                  .filter((profile) => Number(profile.id) !== supervisorDraft?.primary_profile_id)
+                  .map((profile) => (
+                    <NativeSelectOption key={profile.id} value={profile.id}>
+                      {profile.name} · {profile.format} / {profile.model}
+                    </NativeSelectOption>
+                  ))}
+              </NativeSelect>
+            </div>
+            <div className="grid min-w-0 gap-1.5">
+              <Label htmlFor="task-supervisor-policy">{t("Review cadence")}</Label>
+              <NativeSelect
+                id="task-supervisor-policy"
+                value={supervisorDraft?.checkpoint_policy ?? "strategic"}
+                disabled={supervisorBusy || !supervisorDraft || supervisorDraft.mode === "off"}
+                onChange={(event) =>
+                  changeSupervisorDraft({
+                    checkpoint_policy: event.target.value as TaskSupervisorCheckpointPolicy,
+                  })
+                }
+              >
+                <NativeSelectOption value="strategic">{t("Strategic events")}</NativeSelectOption>
+                <NativeSelectOption value="every_round">{t("Every Planner round")}</NativeSelectOption>
+                <NativeSelectOption value="manual">{t("Manual only")}</NativeSelectOption>
+              </NativeSelect>
+            </div>
+          </div>
+
+          {supervisorError ? (
+            <div role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-destructive text-sm">
+              {supervisorError}. {t("Check the selected LLM profiles, then retry.")}
+            </div>
+          ) : null}
+
+          <div className="rounded-lg bg-muted/45 p-4">
+            {latestSupervisorRound ? (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                  <span className="font-medium">
+                    {t("Review round #{id}", { id: latestSupervisorRound.id })}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {t("Trigger")}: {latestSupervisorRound.trigger_kind}
+                  </span>
+                  <code className="max-w-full truncate text-muted-foreground text-xs">
+                    {latestSupervisorRound.snapshot_hash}
+                  </code>
+                </div>
+                <div className="grid gap-2 lg:grid-cols-2">
+                  {latestSupervisorRound.reviews.map((review) => (
+                    <div key={review.id} className="min-w-0 rounded-md bg-background px-3 py-2 text-sm shadow-sm">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium capitalize">{review.lead_role}</span>
+                        <StatusBadge domain="intent" value={review.state} />
+                      </div>
+                      <div className="mt-1 break-words text-muted-foreground text-xs">
+                        {review.account_label} · {review.provider} / {review.model}
+                      </div>
+                      <p className="mt-2 line-clamp-3 break-words text-sm">
+                        {review.error || review.summary || t("Review has not returned a summary yet")}
+                      </p>
+                      <div className="mt-1 text-muted-foreground text-xs tabular-nums">
+                        {t("Tokens")}: {review.input_tokens.toLocaleString(intlLocale)} in ·{" "}
+                        {review.output_tokens.toLocaleString(intlLocale)} out
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex min-w-0 items-start gap-2 text-sm">
+                  <GitMergeIcon className="mt-0.5 size-4 shrink-0 text-violet-500" />
+                  <div className="min-w-0">
+                    <div className="font-medium">{t("Arbiter decision")}</div>
+                    <p className="break-words text-muted-foreground">
+                      {latestSupervisorDecisionSummary || t("Awaiting an Arbiter decision")}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">
+                {supervisorConfig?.mode === "off"
+                  ? t("Project supervision is off. Select one or two lead profiles to enable audited review rounds.")
+                  : t("No review round yet. The next configured checkpoint or a manual review will create one.")}
+              </div>
+            )}
+          </div>
+          {supervisorConfig?.mode !== "off" ? (
+            <div className="grid gap-1 text-muted-foreground text-xs sm:grid-cols-2">
+              <div className="truncate">
+                {t("Primary")}: {profileLabel(supervisorConfig?.primary_profile_id)}
+              </div>
+              {supervisorConfig?.mode === "dual" ? (
+                <div className="truncate">
+                  {t("Secondary")}: {profileLabel(supervisorConfig.secondary_profile_id)}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </CardContent>
       </Card>
       {/* Goal management: view/add/edit/delete this task's exploration goals. Adds and edits notify the planner and revive the task;
@@ -973,7 +1304,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           </div>
           <div>
             <div className="text-xs text-muted-foreground">{t("Running workers")}</div>
-            <div className="mt-1 text-lg font-semibold tabular-nums">{running.length}</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">
+              {running.length}/{workerCapacity}
+            </div>
           </div>
           <div>
             <div className="text-xs text-muted-foreground">{t("Last activity")}</div>
@@ -997,6 +1330,28 @@ export function OverviewTab({ taskId }: { taskId: string }) {
               </div>
             </div>
           ) : null}
+          <div className="col-span-2 grid gap-2 sm:col-span-4 sm:grid-cols-3">
+            {workerLanes.map(({ owner, intent }) => (
+              <div key={owner} className="flex min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-2">
+                {intent ? (
+                  <Loader2Icon className="size-3.5 shrink-0 animate-spin text-blue-500" />
+                ) : (
+                  <span className="size-2.5 shrink-0 rounded-full bg-muted-foreground/30" />
+                )}
+                <span className="shrink-0 font-mono text-xs font-semibold">{owner}</span>
+                {intent ? (
+                  <span className="min-w-0 truncate text-xs" title={intentLabel(intent)}>
+                    <span className="mr-1 font-mono text-muted-foreground">#{intent.id}</span>
+                    {intentLabel(intent)}
+                  </span>
+                ) : (
+                  <span className="min-w-0 truncate text-xs text-muted-foreground">
+                    {task?.paused ? t("Task paused") : t("Idle — no prerequisite-ready intent")}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
         </CardContent>
       </Card>
 

@@ -316,6 +316,7 @@ export const api = {
     coverageEnabled?: boolean;
     interceptRules?: AssetInterceptRuleInput[];
     credentials?: TaskCredentialInput[];
+    supervisor?: import("@/lib/types").TaskSupervisorConfig;
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
@@ -332,6 +333,7 @@ export const api = {
       coverage_enabled: input.coverageEnabled ?? true, // on by default; false disables the asset coverage feature
       intercept_rules: input.interceptRules ?? [], // task-level asset interception rules
       credentials: input.credentials ?? [], // test accounts declared at creation; an empty password = the agent generates and records it (#3)
+      supervisor: input.supervisor,
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
@@ -859,6 +861,18 @@ export const api = {
         dependencies: arr(phase.dependencies),
       })),
     })),
+  taskSupervisor: (id: string) =>
+    get<import("@/lib/types").TaskSupervisorConfig>(`/tasks/${id}/supervisor`),
+  setTaskSupervisor: (id: string, config: import("@/lib/types").TaskSupervisorConfig) =>
+    put<import("@/lib/types").TaskSupervisorConfig>(`/tasks/${id}/supervisor`, config),
+  taskSupervisorRounds: (id: string, limit = 20) =>
+    get<{ items: import("@/lib/types").SupervisorRound[] }>(`/tasks/${id}/supervisor/rounds?limit=${limit}`).then(
+      (r) => ({
+        items: arr(r.items).map((round) => ({ ...round, reviews: arr(round.reviews) })),
+      }),
+    ),
+  runTaskSupervisor: (id: string) =>
+    post<import("@/lib/types").SupervisorAdvice>(`/tasks/${id}/supervisor/run`),
   transitionRedTeamPhase: (
     id: string,
     phase: string,

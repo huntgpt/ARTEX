@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1253,6 +1255,82 @@ type intentItem struct {
 	Priority  int               `json:"priority"`
 }
 
+var (
+	operatorPrerequisiteGoalRE    = regexp.MustCompile(`\bgoal\s*#\s*([0-9]+)\b`)
+	operatorPrerequisiteFindingRE = regexp.MustCompile(`\bfinding\s*#\s*([0-9]+)\b`)
+	operatorPrerequisiteURLRE     = regexp.MustCompile(`https?://[a-z0-9._:-]+`)
+)
+
+// operatorPrerequisiteKey recognizes only the narrow class of planner work that
+// waits for an operator-controlled traffic-evidence prerequisite. Those checks
+// are state observations, not useful work to poll repeatedly: a human action
+// reopens the retained blocked/stopped intent through the main-agent ToolSet.
+//
+// The goal/finding/host tuple deliberately ignores wording and changing fact IDs,
+// which are what made the planner create an unbounded series of equivalent
+// "is capture enabled yet?" intents. Other blocker text is not deduplicated.
+func operatorPrerequisiteKey(summary string) string {
+	lower := strings.ToLower(strings.Join(strings.Fields(summary), " "))
+	if !strings.Contains(lower, "traffic capture") || !strings.Contains(lower, "matching-host") {
+		return ""
+	}
+	if !strings.Contains(lower, "operator") &&
+		!strings.Contains(lower, "approval") &&
+		!strings.Contains(lower, "prerequisite") &&
+		!strings.Contains(lower, "blocker") {
+		return ""
+	}
+	goal := ""
+	if match := operatorPrerequisiteGoalRE.FindStringSubmatch(lower); len(match) == 2 {
+		goal = match[1]
+	}
+	finding := ""
+	if match := operatorPrerequisiteFindingRE.FindStringSubmatch(lower); len(match) == 2 {
+		finding = match[1]
+	}
+	host := ""
+	if match := operatorPrerequisiteURLRE.FindString(lower); match != "" {
+		host = strings.TrimPrefix(strings.TrimPrefix(match, "https://"), "http://")
+	}
+	if host == "" || (goal == "" && finding == "") {
+		return ""
+	}
+	return "operator-traffic-evidence|goal:" + goal + "|finding:" + finding + "|host:" + host
+}
+
+// existingOperatorPrerequisite returns the newest retained intent for key.
+// It derives a key from legacy payloads as well, so upgrading a task already in
+// a blocker loop stops the loop immediately instead of requiring one more poll.
+func (t *ToolSet) existingOperatorPrerequisite(key string) (*db.Node, error) {
+	if key == "" || t.ts == nil {
+		return nil, nil
+	}
+	intents, err := t.ts.ListByKind(db.KindIntent, 5000)
+	if err != nil {
+		return nil, err
+	}
+	for _, intent := range intents {
+		if intent.State == "deleted" {
+			continue
+		}
+		var payload struct {
+			Summary                 string `json:"summary"`
+			OperatorPrerequisiteKey string `json:"operator_prerequisite_key"`
+		}
+		if json.Unmarshal(intent.Payload, &payload) != nil {
+			continue
+		}
+		candidate := payload.OperatorPrerequisiteKey
+		if candidate == "" {
+			candidate = operatorPrerequisiteKey(payload.Summary)
+		}
+		if candidate == key {
+			return intent, nil
+		}
+	}
+	return nil, nil
+}
+
 // addOneIntent creates one intent node, links its upstream lineage, and returns the id.
 // Constraint: an intent may anchor only on confirmed knowledge — every parent_id must
 // be an existing fact/finding node (cannot attach to other intents/goals/hints). Leave
@@ -1295,7 +1373,22 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			return 0, fmt.Errorf("%s", b.String())
 		}
 	}
+	prerequisiteKey := operatorPrerequisiteKey(it.Summary)
+	if existing, err := t.existingOperatorPrerequisite(prerequisiteKey); err != nil {
+		return 0, fmt.Errorf("operator prerequisite deduplication failed: %w", err)
+	} else if existing != nil {
+		// The planner must never turn a stable operator dependency into a polling
+		// loop. An explicit human/main-agent action may, however, reopen the same
+		// retained stopped/blocked/exhausted work after changing the prerequisite.
+		if t.resumeTask != nil {
+			_, _ = t.ts.ReopenIntent(existing.ID)
+		}
+		return existing.ID, nil
+	}
 	payload := map[string]any{"summary": it.Summary}
+	if prerequisiteKey != "" {
+		payload["operator_prerequisite_key"] = prerequisiteKey
+	}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
@@ -1416,6 +1509,13 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if err != nil || goalNode == nil || goalNode.Kind != db.KindGoal {
 				return actool.Errorf("goal_id must be a goal node of this task (related-task goals are read-only)"), nil
 			}
+			completionIssues, err := t.goalCompletionIssues(ctx, goalNode)
+			if err != nil {
+				return actool.Errorf(fmt.Sprintf("prove_goal refused (fail-closed): completion prerequisites for goal %d could not be checked (%v). Goal stays open.", goal, err)), nil
+			}
+			if len(completionIssues) > 0 {
+				return actool.Errorf(fmt.Sprintf("prove_goal refused: goal %d is a broad engagement deliverable whose task-wide prerequisites are not complete: %s. Goal stays open.", goal, strings.Join(completionIssues, "; "))), nil
+			}
 			evidenceNode, err := t.ts.GetNodeWithSources(ev)
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id must be a fact/finding node of this task or a directly related task"), nil
@@ -1474,6 +1574,18 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			// met; if so, automatically judge the task complete (set GoalMet) — no need to
 			// rely on the model explicitly calling goal_met.
 			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {
+				invalid, gateErr := t.reopenInvalidMetGoals(ctx, goals)
+				if gateErr != nil {
+					return actool.Errorf(fmt.Sprintf("goal %d was proved, but task completion validation failed closed: %v", goal, gateErr)), nil
+				}
+				if len(invalid) > 0 {
+					parts := make([]string, 0, len(invalid))
+					for goalID, issues := range invalid {
+						parts = append(parts, fmt.Sprintf("goal %d: %s", goalID, strings.Join(issues, "; ")))
+					}
+					slices.Sort(parts)
+					return actool.Text(fmt.Sprintf("goal %d marked met; task remains open because previously met broad deliverables were reopened: %s", goal, strings.Join(parts, " | "))), nil
+				}
 				allMet := true
 				for _, g := range goals {
 					if g.State != "met" {
@@ -1494,7 +1606,7 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 func (t *ToolSet) goalMet() actool.CoreTool {
 	return t.writeExpTool("goal_met", "[End the entire task immediately] — call only when you are sure [all of the task's goals are truly met and it is complete overall] (note: the task as a [whole]; having met just one goal / one flag / one finding [does not count] — in that case mark that goal with prove_goal). ⚠️ It is NOT for \"ending this planning round\": if there is no new intent to dispatch this round, or you're waiting on worker output, [just end the round — do NOT call this tool] (0 intents is a perfectly normal outcome). Prefer prove_goal to prove goals one by one; goal_met is only a means to skip per-goal proofs and complete the task globally.",
 		obj(map[string]any{"reason": str("grounds for completion (must be evidence that the goals are truly met, not a round-ending reason like 'no new directions this round')")}, "reason"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Reason string }
 			_ = json.Unmarshal(in, &a)
 			// goal_met ends the task only when no goal node is open (#124, F5). A task
@@ -1502,6 +1614,18 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 			goals, err := t.ts.ListByKind(db.KindGoal, 1000)
 			if err != nil {
 				return actool.Errorf("goal_met refused: the goals of this task could not be read (" + err.Error() + "); the task stays open"), nil
+			}
+			invalid, err := t.reopenInvalidMetGoals(ctx, goals)
+			if err != nil {
+				return actool.Errorf("goal_met refused (fail-closed): task-wide completion prerequisites could not be checked (" + err.Error() + "); the task stays open"), nil
+			}
+			if len(invalid) > 0 {
+				parts := make([]string, 0, len(invalid))
+				for goalID, issues := range invalid {
+					parts = append(parts, fmt.Sprintf("goal %d: %s", goalID, strings.Join(issues, "; ")))
+				}
+				slices.Sort(parts)
+				return actool.Errorf("goal_met refused: previously met broad deliverables were reopened because prerequisites are incomplete: " + strings.Join(parts, " | ") + "; the task stays open"), nil
 			}
 			open := 0
 			for _, g := range goals {

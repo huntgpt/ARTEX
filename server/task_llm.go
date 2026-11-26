@@ -53,6 +53,15 @@ type taskLLMRuntime struct {
 	s        *Server
 	taskID   string
 	agentKey string
+
+	// refusalSticky keeps a successful policy-refusal fallback pinned to the
+	// transcript session that triggered it. Worker session IDs are deterministic
+	// per intent, so concurrent worker lanes do not affect each other and every
+	// later turn of the same intent stays on the provider that accepted the work.
+	// Only refusals create entries; the map is therefore bounded by the number of
+	// sessions that actually needed a fallback during this runtime's lifetime.
+	refusalStickyMu sync.Mutex
+	refusalSticky   map[string]int64
 }
 
 type taskLLMError struct {
@@ -138,6 +147,11 @@ func resetLLMFailStreak(taskID string, profileID int64) {
 type taskLLMSelection struct {
 	task      *Task
 	profileID int64
+	// refusalProfileID identifies the physical profile that may be excluded from
+	// a request-specific policy-refusal fallback. Unlike profileID it is also set
+	// for agent bindings and persisted-global profiles, which deliberately retain
+	// profileID=0 so ordinary quota/failure handling cannot mutate the task chain.
+	refusalProfileID int64
 	// healthProfileID is the llm_profiles row whose breaker state the calls on
 	// this selection update. It equals profileID on the task-chain path; a bound
 	// agent or the global provider carries its own id here while profileID stays
@@ -152,10 +166,23 @@ type taskLLMSelection struct {
 	retry agent.RetryConfig
 }
 
+func refusalIDForSelection(selection taskLLMSelection) int64 {
+	if selection.refusalProfileID != 0 {
+		return selection.refusalProfileID
+	}
+	return selection.profileID
+}
+
 // llmProfilePin carries a per-run chain-head override through the call stack
 // (#85 per-intent rotation). The engine sets it when launching a worker run;
 // resolution stays within the task's chain and never bypasses failover state.
 type llmProfilePinKey struct{}
+
+// llmRefusalProfilePinKey is intentionally separate from llmProfilePinKey.
+// Normal worker rotation must continue to respect an explicit agent binding;
+// a request-specific refusal fallback must temporarily bypass that binding and
+// select the alternate ready task-chain profile.
+type llmRefusalProfilePinKey struct{}
 
 func withLLMProfilePin(ctx context.Context, profileID int64) context.Context {
 	return context.WithValue(ctx, llmProfilePinKey{}, profileID)
@@ -169,10 +196,31 @@ func llmProfilePinFrom(ctx context.Context) (int64, bool) {
 	return id, ok
 }
 
+func withLLMRefusalProfilePin(ctx context.Context, profileID int64) context.Context {
+	return context.WithValue(ctx, llmRefusalProfilePinKey{}, profileID)
+}
+
+func llmRefusalProfilePinFrom(ctx context.Context) (int64, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	id, ok := ctx.Value(llmRefusalProfilePinKey{}).(int64)
+	return id, ok && id > 0
+}
+
 type taskLLMStreamHooks struct {
 	current    func(context.Context) (taskLLMSelection, error)
 	exhaust    func(taskLLMSelection, error) (db.TaskLLMTransition, error)
 	transition func(taskLLMSelection, db.TaskLLMTransition, error)
+	// refusalFallback returns one different ready task-chain profile for a
+	// deterministic provider policy refusal. Refusals are request-specific, not
+	// provider-health or quota failures, so they must never advance the durable
+	// failover cursor or trip a profile breaker.
+	refusalFallback func(refusedProfileID int64) int64
+	// stickRefusalFallback records a fallback only after the alternate provider
+	// successfully completes the logical call. The next turn in the same
+	// transcript session then resolves directly to that profile.
+	stickRefusalFallback func(context.Context, int64)
 	// recordHealth reports one physical provider attempt to the process-wide
 	// breaker. It keeps /system/llm/ truthful for every selection whose provider
 	// is not already the failover Pool (the chain, a bound agent, the global
@@ -191,6 +239,71 @@ func healthIDFor(prov llm.Provider, profileID int64) int64 {
 		return 0
 	}
 	return profileID
+}
+
+func (r *taskLLMRuntime) refusalSessionKey(ctx context.Context) string {
+	sessionID := strings.TrimSpace(transcript.SessionIDFrom(ctx))
+	if sessionID == "" {
+		return ""
+	}
+	return r.taskID + "\x00" + r.agentKey + "\x00" + sessionID
+}
+
+func (r *taskLLMRuntime) stickyRefusalProfile(ctx context.Context) int64 {
+	key := r.refusalSessionKey(ctx)
+	if key == "" {
+		return 0
+	}
+	r.refusalStickyMu.Lock()
+	defer r.refusalStickyMu.Unlock()
+	return r.refusalSticky[key]
+}
+
+func (r *taskLLMRuntime) stickRefusalFallback(ctx context.Context, profileID int64) {
+	key := r.refusalSessionKey(ctx)
+	if key == "" || profileID <= 0 {
+		return
+	}
+	r.refusalStickyMu.Lock()
+	if r.refusalSticky == nil {
+		r.refusalSticky = map[string]int64{}
+	}
+	r.refusalSticky[key] = profileID
+	r.refusalStickyMu.Unlock()
+}
+
+func (r *taskLLMRuntime) clearStickyRefusalProfile(ctx context.Context) {
+	key := r.refusalSessionKey(ctx)
+	if key == "" {
+		return
+	}
+	r.refusalStickyMu.Lock()
+	delete(r.refusalSticky, key)
+	r.refusalStickyMu.Unlock()
+}
+
+func readyTaskProfile(task *db.Task, profileID int64) bool {
+	if task == nil || profileID <= 0 {
+		return false
+	}
+	for _, readyID := range task.ReadyLLMProfileIDs {
+		if readyID == profileID {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *taskLLMRuntime) selectionForTaskProfile(sel taskLLMSelection, profileID int64) (taskLLMSelection, error) {
+	prov, cfg, ok := r.s.providerForProfile(profileID)
+	if !ok {
+		return sel, fmt.Errorf("LLM profile #%d is missing or invalid", profileID)
+	}
+	sel.profileID = profileID
+	sel.refusalProfileID = profileID
+	sel.provider, sel.retry = prov, cfg.Retry
+	sel.healthProfileID = profileID // task-chain selections never go through the Pool
+	return sel, nil
 }
 
 // currentFor resolves the provider this role runs on, by precedence:
@@ -220,8 +333,27 @@ func (r *taskLLMRuntime) currentFor(ctx context.Context) (taskLLMSelection, erro
 	r.s.syncTaskLLMState(pt)
 	t, _ := r.s.m.Task(r.taskID)
 	sel := taskLLMSelection{task: t, revision: pt.LLMChainRevision}
+	// A successful refusal fallback is session-local and outranks an agent
+	// binding. The explicit pin is used only while replaying the refused call;
+	// the sticky entry is written after that replay succeeds.
+	forcedProfileID, explicitRefusalPin := llmRefusalProfilePinFrom(ctx)
+	if !explicitRefusalPin {
+		forcedProfileID = r.stickyRefusalProfile(ctx)
+	}
+	if forcedProfileID > 0 {
+		if readyTaskProfile(pt, forcedProfileID) {
+			return r.selectionForTaskProfile(sel, forcedProfileID)
+		}
+		// A profile removed, exhausted, or made invalid after the fallback must
+		// not strand the session. Drop the stale sticky choice and resume normal
+		// precedence. An explicit replay pin simply falls through.
+		if !explicitRefusalPin {
+			r.clearStickyRefusalProfile(ctx)
+		}
+	}
 	if prov, cfg, id, ok := r.s.agentBindingProvider(r.agentKey); ok {
 		sel.provider, sel.retry = prov, cfg.Retry
+		sel.refusalProfileID = id
 		sel.healthProfileID = healthIDFor(prov, id)
 		return sel, nil
 	}
@@ -238,19 +370,14 @@ func (r *taskLLMRuntime) currentFor(ctx context.Context) (taskLLMSelection, erro
 				}
 			}
 		}
-		prov, cfg, ok := r.s.providerForProfile(sel.profileID)
-		if !ok {
-			return sel, fmt.Errorf("LLM profile #%d is missing or invalid", sel.profileID)
-		}
-		sel.provider, sel.retry = prov, cfg.Retry
-		sel.healthProfileID = sel.profileID // chain selections never go through the Pool
-		return sel, nil
+		return r.selectionForTaskProfile(sel, sel.profileID)
 	}
 	prov, cfg, id, ok := r.s.globalProviderWithProfile()
 	if !ok {
 		return sel, fmt.Errorf("task %s has no available fallback LLM provider", r.taskID)
 	}
 	sel.provider, sel.retry = prov, cfg.Retry
+	sel.refusalProfileID = id
 	sel.healthProfileID = healthIDFor(prov, id)
 	return sel, nil
 }
@@ -313,7 +440,7 @@ func (r *taskLLMRuntime) streamHooks() taskLLMStreamHooks {
 	return taskLLMStreamHooks{
 		current: func(ctx context.Context) (taskLLMSelection, error) { return r.currentFor(ctx) },
 		recordHealth: func(ctx context.Context, profileID int64, stream, committed bool, err error) {
-			if profileID == 0 || r.s == nil || r.s.llmHealth == nil {
+			if profileID == 0 || r.s == nil || r.s.llmHealth == nil || isProviderRefusalError(err) {
 				return
 			}
 			if tripped, msg := r.s.llmHealth.RecordCall(ctx, profileID, stream, committed, err); tripped {
@@ -334,6 +461,8 @@ func (r *taskLLMRuntime) streamHooks() taskLLMStreamHooks {
 		transition: func(selection taskLLMSelection, transition db.TaskLLMTransition, cause error) {
 			r.s.emitTaskLLMTransition(selection.task, transition, cause)
 		},
+		refusalFallback:      r.refusalFallbackProfile,
+		stickRefusalFallback: r.stickRefusalFallback,
 	}
 }
 
@@ -349,7 +478,205 @@ func (r *taskLLMRuntime) Stream(ctx context.Context, req llm.CompletionRequest) 
 // streaming path needs is unnecessary here).
 func (r *taskLLMRuntime) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 	ctx = llmrec.WithTaskID(ctx, r.taskID)
-	return completeTaskLLM(ctx, r.taskID, req, r.streamHooks())
+	initial, selectionErr := r.currentFor(ctx)
+	if selectionErr != nil {
+		return llm.Message{}, "", llm.Usage{}, selectionErr
+	}
+	msg, stop, usage, err := completeTaskLLM(ctx, r.taskID, req, r.streamHooks())
+	refusedID := refusalIDForSelection(initial)
+	if err == nil || refusedID == 0 || !isProviderRefusalError(err) {
+		return msg, stop, usage, err
+	}
+	fallbackID := r.refusalFallbackProfile(refusedID)
+	if fallbackID == 0 {
+		return msg, stop, usage, err
+	}
+	log.Printf("[task-llm] task %s profile #%d refused the request; replaying once on ready profile #%d", r.taskID, refusedID, fallbackID)
+	fallbackCtx := withLLMRefusalProfilePin(ctx, fallbackID)
+	msg, stop, fallbackUsage, fallbackErr := completeTaskLLM(fallbackCtx, r.taskID, req, r.streamHooks())
+	usage.Add(fallbackUsage)
+	if fallbackErr == nil {
+		r.stickRefusalFallback(ctx, fallbackID)
+	}
+	return msg, stop, usage, fallbackErr
+}
+
+// refusalFallbackProfile selects a different ready task-chain profile for one
+// logical call. A model-specific safety refusal must not exhaust or mutate the
+// task's durable failover cursor after a single request; it also must not leave
+// a worker lane retrying the same deterministic refusal.
+func (r *taskLLMRuntime) refusalFallbackProfile(refusedID int64) int64 {
+	taskID, err := parseTaskID(r.taskID)
+	if err != nil {
+		return 0
+	}
+	task, err := r.s.m.pg.GetTask(taskID)
+	if err != nil || task == nil {
+		return 0
+	}
+	for _, profileID := range task.ReadyLLMProfileIDs {
+		if profileID != refusedID {
+			return profileID
+		}
+	}
+	return 0
+}
+
+var errProviderPolicyRefusal = errors.New("provider policy refusal")
+
+func normalizedRefusalText(text string) string {
+	text = strings.ToLower(strings.TrimSpace(text))
+	text = strings.NewReplacer(
+		"’", "'", "‘", "'", "`", "'", "\u00a0", " ",
+	).Replace(text)
+	return strings.Join(strings.Fields(text), " ")
+}
+
+var providerRefusalPrefixes = []string{
+	"i'm sorry, but i can't",
+	"i'm sorry, but i cannot",
+	"sorry, but i can't",
+	"sorry, but i cannot",
+	"i can't assist with",
+	"i cannot assist with",
+	"i'm unable to assist with",
+	"i'm unable to help with",
+	"i can't help with",
+	"i cannot help with",
+	"i'm not able to help with",
+	"i must decline",
+	"i have to decline",
+}
+
+const providerRefusalProbeMax = 2048
+
+func isProviderRefusalText(text string) bool {
+	normalized := normalizedRefusalText(text)
+	if normalized == "" || len(normalized) > providerRefusalProbeMax {
+		return false
+	}
+	for _, prefix := range providerRefusalPrefixes {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// couldBeProviderRefusalText keeps only a small initial assistant prefix
+// buffered. Normal responses are released as soon as they diverge from every
+// known refusal prefix; refusal-shaped responses remain uncommitted and can be
+// replayed safely on the alternate provider.
+func couldBeProviderRefusalText(text string) bool {
+	normalized := normalizedRefusalText(text)
+	if normalized == "" {
+		return true
+	}
+	if len(normalized) > providerRefusalProbeMax {
+		return false
+	}
+	for _, prefix := range providerRefusalPrefixes {
+		if strings.HasPrefix(prefix, normalized) || strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isProviderRefusalStopReason(stopReason string) bool {
+	switch normalizedRefusalText(stopReason) {
+	case "refusal", "content_filter", "content filter", "safety", "safety_filter", "policy_refusal":
+		return true
+	default:
+		return false
+	}
+}
+
+func isProviderRefusalResult(msg llm.Message, stopReason string) bool {
+	return isProviderRefusalStopReason(stopReason) || (len(msg.ToolUses()) == 0 && isProviderRefusalText(msg.Text()))
+}
+
+func isProviderRefusalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errProviderPolicyRefusal) {
+		return true
+	}
+	rawMessage := strings.TrimSpace(err.Error())
+	message := strings.ToLower(rawMessage)
+	compact := strings.NewReplacer(" ", "", "\t", "", "\r", "", "\n", "").Replace(message)
+	if strings.Contains(compact, `"stop_reason":"refusal"`) ||
+		strings.Contains(compact, `"stopreason":"refusal"`) ||
+		strings.Contains(compact, `"finish_reason":"content_filter"`) ||
+		strings.Contains(message, "stop reason: refusal") ||
+		strings.Contains(message, "safeguards flagged this message") ||
+		strings.Contains(message, "request refused by safety policy") ||
+		strings.Contains(message, "blocked by the safety system") ||
+		strings.Contains(message, "provider policy refusal") {
+		return true
+	}
+	// Local CLI adapters sometimes return a refusal as their ordinary error
+	// payload rather than a structured stop reason. Only inspect the beginning of
+	// a known CLI error payload (or selected JSON result fields); do not search an
+	// arbitrary error for refusal prose, because diagnostics may merely quote a
+	// previous assistant response while describing an unrelated failure.
+	if isProviderRefusalText(rawMessage) {
+		return true
+	}
+	for _, prefix := range []string{
+		"Claude Code returned an error:",
+		"Claude Code failed:",
+		"Codex CLI failed:",
+		"local CLI returned an error:",
+	} {
+		if _, after, ok := strings.Cut(rawMessage, prefix); ok && isProviderRefusalText(strings.TrimSpace(after)) {
+			return true
+		}
+	}
+	return embeddedJSONRefusal(rawMessage)
+}
+
+func embeddedJSONRefusal(message string) bool {
+	for offset := 0; offset < len(message); {
+		rel := strings.IndexByte(message[offset:], '{')
+		if rel < 0 {
+			return false
+		}
+		start := offset + rel
+		var payload any
+		decoder := json.NewDecoder(strings.NewReader(message[start:]))
+		if err := decoder.Decode(&payload); err == nil && jsonPayloadHasRefusal(payload) {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
+}
+
+func jsonPayloadHasRefusal(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "result", "message", "error", "output_text", "text":
+				if text, ok := child.(string); ok && isProviderRefusalText(text) {
+					return true
+				}
+			case "response", "body", "detail":
+				if jsonPayloadHasRefusal(child) {
+					return true
+				}
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if jsonPayloadHasRefusal(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) (llm.Message, string, llm.Usage, error) {
@@ -374,10 +701,17 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 		for attempt := 0; ; attempt++ {
 			msg, sr, usage, callErr = selection.provider.Complete(ctx, req)
 			total.Add(usage)
+			if callErr == nil && isProviderRefusalResult(msg, sr) {
+				// Some CLI/provider adapters surface a policy refusal as a normal
+				// assistant message (or only as stop_reason) with nil error. Convert
+				// it to the same internal signal as structured refusal errors so the
+				// atomic request can be replayed without exposing the refusal turn.
+				callErr = errProviderPolicyRefusal
+			}
 			if hooks.recordHealth != nil {
 				hooks.recordHealth(ctx, selection.healthProfileID, false, false, callErr)
 			}
-			if callErr != nil && ctx.Err() == nil &&
+			if callErr != nil && ctx.Err() == nil && !isProviderRefusalError(callErr) &&
 				attempt < retries && isRetryableStreamError(callErr) {
 				backoff := backoffOf(attempt)
 				log.Printf("[task-llm] task %s non-streaming call failed, retrying on the same provider after %v (%d/%d): %v",
@@ -392,6 +726,12 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 		if callErr == nil {
 			resetLLMFailStreak(taskID, selection.profileID)
 			return msg, sr, total, nil
+		}
+		if isProviderRefusalError(callErr) {
+			// The outer task runtime may replay this atomic request once on a
+			// different ready profile. Do not count a policy decision as a broken
+			// provider or quota event.
+			return llm.Message{}, "", total, callErr
 		}
 		// Non-quota failures on a chain profile escalate after a consecutive
 		// streak (#99): same advance path as quota exhaust, truthful reason.
@@ -432,6 +772,8 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 
 func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		refusalFallbackUsed := false
+		var refusalFallbackID int64
 		for {
 			selection, err := hooks.current(ctx)
 			if err != nil {
@@ -479,9 +821,35 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 				pending = nil
 				streamErr = nil
 				attemptUsage = llm.Usage{}
+				var refusalText strings.Builder
 				for event, err := range selection.provider.Stream(ctx, req) {
 					if err != nil {
 						streamErr = err
+						break
+					}
+					if !committed && event.Type == llm.SETextDelta {
+						// Hold only a refusal-shaped opening. Ordinary text diverges
+						// within its first few characters and is released immediately;
+						// a short policy refusal stays uncommitted until its terminal
+						// event, allowing a safe replay on another provider.
+						pending = append(pending, event)
+						refusalText.WriteString(event.Text)
+						if couldBeProviderRefusalText(refusalText.String()) {
+							continue
+						}
+						for _, buffered := range pending {
+							if !forward(buffered) {
+								return
+							}
+						}
+						pending = nil
+						committed = true
+						continue
+					}
+					if !committed && (event.Type == llm.SEMessageDelta || event.Type == llm.SEMessageStop) &&
+						(isProviderRefusalStopReason(event.StopReason) || isProviderRefusalText(refusalText.String())) {
+						pending = append(pending, event)
+						streamErr = errProviderPolicyRefusal
 						break
 					}
 					if !committed && !streamEventCommitsOutput(event) {
@@ -501,6 +869,9 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 						return
 					}
 				}
+				if streamErr == nil && !committed && isProviderRefusalText(refusalText.String()) {
+					streamErr = errProviderPolicyRefusal
+				}
 				if hooks.recordHealth != nil {
 					hooks.recordHealth(ctx, selection.healthProfileID, true, committed, streamErr)
 				}
@@ -513,7 +884,7 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 					}
 					pending = nil
 				}
-				if streamErr != nil && !committed && ctx.Err() == nil &&
+				if streamErr != nil && !committed && ctx.Err() == nil && !isProviderRefusalError(streamErr) &&
 					attempt < retries && isRetryableStreamError(streamErr) {
 					backoff := backoffOf(attempt)
 					log.Printf("[task-llm] task %s pre-commit stream failure, retrying on the same provider after %v (%d/%d): %v",
@@ -528,11 +899,28 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 			}
 			if streamErr == nil {
 				resetLLMFailStreak(taskID, selection.profileID)
+				if refusalFallbackID != 0 && hooks.stickRefusalFallback != nil {
+					hooks.stickRefusalFallback(ctx, refusalFallbackID)
+				}
 				for _, buffered := range pending {
 					if !forward(buffered) {
 						return
 					}
 				}
+				return
+			}
+			if isProviderRefusalError(streamErr) && !committed {
+				if !refusalFallbackUsed && hooks.refusalFallback != nil {
+					refusedID := refusalIDForSelection(selection)
+					if fallbackID := hooks.refusalFallback(refusedID); fallbackID != 0 {
+						log.Printf("[task-llm] task %s profile #%d refused the stream; replaying once on ready profile #%d", taskID, refusedID, fallbackID)
+						ctx = withLLMRefusalProfilePin(ctx, fallbackID)
+						refusalFallbackUsed = true
+						refusalFallbackID = fallbackID
+						continue
+					}
+				}
+				yield(llm.StreamEvent{}, streamErr)
 				return
 			}
 			// Non-quota failures on a chain profile escalate after a consecutive
@@ -591,12 +979,16 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 }
 
 // pendingUsage is the usage the buffered (uncommitted) events of one attempt
-// reported. Only message_start can be buffered: message_delta commits.
+// reported. A refusal stop may keep message_delta buffered too, so fold its
+// echoed counters with the same semantics as llm.Accumulator.
 func pendingUsage(pending []llm.StreamEvent) llm.Usage {
 	var u llm.Usage
 	for _, ev := range pending {
-		if ev.Type == llm.SEMessageStart {
+		switch ev.Type {
+		case llm.SEMessageStart:
 			u.Add(ev.Usage)
+		case llm.SEMessageDelta:
+			u.MergeEcho(ev.Usage)
 		}
 	}
 	return u

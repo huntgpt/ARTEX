@@ -60,10 +60,11 @@ type Task struct {
 	LLMRotate         bool `json:"llm_rotate,omitempty"`
 	rotateMu          sync.Mutex
 	rotateNext        int
-	LLMFailoverReason string  `json:"llm_failover_reason,omitempty"`
-	SourceTaskIDs     []int64 `json:"source_task_ids,omitempty"`
-	CompanyIDs        []int64 `json:"company_ids,omitempty"`
-	Status            string  `json:"status"` // persisted lifecycle status (done/failed/timeout are terminal; empty/other is derived from runtime state)
+	LLMFailoverReason string                    `json:"llm_failover_reason,omitempty"`
+	Supervisor        pgdb.TaskSupervisorConfig `json:"supervisor"`
+	SourceTaskIDs     []int64                   `json:"source_task_ids,omitempty"`
+	CompanyIDs        []int64                   `json:"company_ids,omitempty"`
+	Status            string                    `json:"status"` // persisted lifecycle status (done/failed/timeout are terminal; empty/other is derived from runtime state)
 	// Task-level timeout (see docs/task-timeout-and-settle-design.md). DeadlineAt/FirstRunAt are unix seconds, 0 = unset/not yet run.
 	TimeoutSeconds       int                    `json:"timeout_seconds"`
 	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner heartbeat trigger interval (seconds)
@@ -77,6 +78,7 @@ type Task struct {
 	notify               chan struct{}
 	lifecycleMu          sync.RWMutex
 	llmMu                sync.RWMutex
+	supervisorMu         sync.RWMutex
 	// targetGate is the task's opt-in to the approval gate for asset targets.
 	// Atomic: it is switched through the API while tool calls read it.
 	targetGate  atomic.Bool
@@ -194,6 +196,23 @@ func (t *Task) llmStateSnapshot() taskLLMState {
 		FailoverState:  t.LLMFailoverState,
 		FailoverReason: t.LLMFailoverReason,
 	}
+}
+
+func (t *Task) supervisorSnapshot() pgdb.TaskSupervisorConfig {
+	t.supervisorMu.RLock()
+	defer t.supervisorMu.RUnlock()
+	cfg := t.Supervisor
+	cfg.PrimaryProfileID = cloneInt64Ptr(cfg.PrimaryProfileID)
+	cfg.SecondaryProfileID = cloneInt64Ptr(cfg.SecondaryProfileID)
+	return cfg
+}
+
+func (t *Task) setSupervisor(cfg pgdb.TaskSupervisorConfig) {
+	t.supervisorMu.Lock()
+	cfg.PrimaryProfileID = cloneInt64Ptr(cfg.PrimaryProfileID)
+	cfg.SecondaryProfileID = cloneInt64Ptr(cfg.SecondaryProfileID)
+	t.Supervisor = cfg
+	t.supervisorMu.Unlock()
 }
 
 // nextRotatedProfile returns the chain head for the NEXT claimed worker
@@ -1028,6 +1047,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		LLMProfileIDs: append([]int64(nil), pt.LLMProfileIDs...), ActiveLLMProfileID: pt.ActiveLLMProfileID, LLMRotate: pt.LLMRotate,
 		LLMChainRevision: pt.LLMChainRevision,
 		LLMFailoverState: pt.LLMFailoverState, LLMFailoverReason: pt.LLMFailoverReason,
+		Supervisor:     pt.Supervisor,
 		SourceTaskIDs:  append([]int64(nil), pt.SourceTaskIDs...),
 		CompanyIDs:     append([]int64(nil), pt.CompanyIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
@@ -1318,6 +1338,29 @@ func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activePr
 		return reopened, nil
 	}
 	return 0, nil
+}
+
+// ReplaceTaskSupervisorConfig updates the stable lead bindings without touching
+// the worker/planner failover chain or rebuilding the task runtime.
+func (m *Manager) ReplaceTaskSupervisorConfig(id string, input *pgdb.TaskSupervisorConfig) (pgdb.TaskSupervisorConfig, error) {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || n <= 0 {
+		return pgdb.TaskSupervisorConfig{}, fmt.Errorf("invalid task id %q", id)
+	}
+	cfg, err := m.pg.ReplaceTaskSupervisorConfig(n, input)
+	if err != nil {
+		return pgdb.TaskSupervisorConfig{}, err
+	}
+	m.mu.Lock()
+	task := m.tasks[id]
+	if task != nil {
+		task.setSupervisor(cfg)
+	}
+	m.mu.Unlock()
+	if task != nil {
+		task.Notify()
+	}
+	return cfg, nil
 }
 
 // LoadExisting rebuilds in-memory task handles from the PG task registry.

@@ -29,6 +29,130 @@ type RedTeamPhaseRun struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
+// GoalCompletionRequirements selects the deterministic task-state checks that
+// must pass before a broad, end-of-engagement goal may be proved. Ordinary
+// narrow goals leave every field false and are unaffected.
+type GoalCompletionRequirements struct {
+	WorkflowComplete bool
+	FindingsVerified bool
+	RetestsComplete  bool
+	ReportAvailable  bool
+}
+
+// GoalCompletionIssues returns precise, stable reasons why a broad red-team
+// deliverable cannot close yet. It deliberately does not call
+// EnsureRedTeamWorkflow: proof is fail-closed when a goal claims an
+// engagement-wide deliverable but its required phase ledger was never created.
+func (s *ExplorationStore) GoalCompletionIssues(ctx context.Context, req GoalCompletionRequirements) ([]string, error) {
+	if s == nil || (!req.WorkflowComplete && !req.FindingsVerified && !req.RetestsComplete && !req.ReportAvailable) {
+		return nil, nil
+	}
+	var phaseRows int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM red_team_phase_runs WHERE exploration_id=$1`, s.expID).Scan(&phaseRows); err != nil {
+		return nil, err
+	}
+	if phaseRows == 0 {
+		return []string{"required red-team phase ledger is missing"}, nil
+	}
+
+	issues := []string{}
+	if req.WorkflowComplete {
+		rows, err := s.db.QueryContext(ctx, `SELECT phase,state FROM red_team_phase_runs
+WHERE exploration_id=$1 AND state IN ('pending','ready','running') ORDER BY phase`, s.expID)
+		if err != nil {
+			return nil, err
+		}
+		var waiting []string
+		for rows.Next() {
+			var phase, state string
+			if err := rows.Scan(&phase, &state); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			waiting = append(waiting, phase+"="+state)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if len(waiting) > 0 {
+			issues = append(issues, "red-team phases are unfinished: "+strings.Join(waiting, ", "))
+		}
+	}
+
+	var taskID int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM tasks WHERE exploration_id=$1 AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`, s.expID).Scan(&taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return append(issues, "task record for the red-team exploration is missing"), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// False positives, duplicates and ignored rows do not hold a deliverable
+	// open. Every other finding is part of the assessment output until triage
+	// explicitly removes it.
+	const actionable = `COALESCE(f.status,'pending') NOT IN ('false_positive','duplicate','ignored')`
+	if req.FindingsVerified {
+		var pending, unverified int
+		q := `SELECT
+			count(*) FILTER (WHERE COALESCE(f.status,'pending') IN ('pending','in_progress')),
+			count(*) FILTER (WHERE COALESCE(f.verification_status,'unverified') <> 'verified')
+		FROM findings f WHERE f.task_id=$1 AND ` + actionable
+		if err := s.db.QueryRowContext(ctx, q, taskID).Scan(&pending, &unverified); err != nil {
+			return nil, err
+		}
+		if pending > 0 {
+			issues = append(issues, fmt.Sprintf("%d actionable findings still await triage", pending))
+		}
+		if unverified > 0 {
+			issues = append(issues, fmt.Sprintf("%d actionable findings are not verified", unverified))
+		}
+	}
+
+	if req.RetestsComplete {
+		var findings, missing int
+		q := `SELECT count(*), count(*) FILTER (WHERE NOT EXISTS (
+			SELECT 1 FROM finding_retests r WHERE r.finding_id=f.id AND r.status='completed'
+		)) FROM findings f WHERE f.task_id=$1 AND ` + actionable
+		if err := s.db.QueryRowContext(ctx, q, taskID).Scan(&findings, &missing); err != nil {
+			return nil, err
+		}
+		if findings == 0 {
+			issues = append(issues, "no actionable findings exist for completed retest evidence")
+		} else if missing > 0 {
+			issues = append(issues, fmt.Sprintf("%d of %d actionable findings have no completed retest", missing, findings))
+		}
+	}
+
+	if req.ReportAvailable {
+		var phaseState, phaseResult string
+		err := s.db.QueryRowContext(ctx, `SELECT state,current_result FROM red_team_phase_runs
+			WHERE exploration_id=$1 AND phase='report'`, s.expID).Scan(&phaseState, &phaseResult)
+		if errors.Is(err, sql.ErrNoRows) {
+			issues = append(issues, "report phase is missing")
+		} else if err != nil {
+			return nil, err
+		} else {
+			if phaseState != "complete" {
+				issues = append(issues, "report phase is "+phaseState+", not complete")
+			}
+			if strings.TrimSpace(phaseResult) == "" {
+				issues = append(issues, "report phase has no recorded report artifact")
+			}
+		}
+		var missing int
+		q := `SELECT count(*) FROM findings f WHERE f.task_id=$1 AND ` + actionable + `
+			AND (btrim(COALESCE(f.report,''))='' OR f.report_evidence_version < f.evidence_version)`
+		if err := s.db.QueryRowContext(ctx, q, taskID).Scan(&missing); err != nil {
+			return nil, err
+		}
+		if missing > 0 {
+			issues = append(issues, fmt.Sprintf("%d actionable findings have no current report artifact", missing))
+		}
+	}
+	return issues, nil
+}
+
 var RedTeamWorkflow = []RedTeamPhaseDefinition{
 	{Phase: "passive_discovery", Label: "Passive discovery", Execution: "artex_automated", Tools: []string{"web_search", "whois", "certificate-transparency"}},
 	{Phase: "ownership", Label: "Ownership verification", Execution: "artex_operator_gate", Tools: []string{"rdap", "whois", "dns"}, Dependencies: []string{"passive_discovery"}},
