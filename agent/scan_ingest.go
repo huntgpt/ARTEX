@@ -502,24 +502,55 @@ func (s *scanIngest) addNmapHost(h nmapHost) {
 	s.fact(summary, detail)
 }
 
+// gowitnessMaxLineBytes is deliberately larger than the generic JSONL limit:
+// Gowitness v3 records may embed the page HTML and network log in the same JSON
+// object even though ARTEX allow-lists and retains none of those fields. Keep a
+// firm per-record bound below the 256 MiB file cap so one hostile record cannot
+// cause unbounded allocation while normal multi-megabyte captures still ingest.
+const gowitnessMaxLineBytes = 16 << 20
+
 // readJSONLines calls fn with each non-blank line of r, and returns the number
 // of lines skipped for exceeding bbotMaxLineBytes. fn must not keep the line:
 // its buffer is reused by the next read.
 func readJSONLines(r io.Reader, fn func(line []byte)) (int, error) {
+	return readJSONLinesLimit(r, bbotMaxLineBytes, fn)
+}
+
+// readJSONLinesLimit is the bounded JSONL reader shared by scanner importers.
+// It grows only the current accepted record, up to maxLineBytes; after crossing
+// the cap it discards chunks until the next newline without retaining them. A
+// line exactly at the cap (including its newline) remains valid.
+func readJSONLinesLimit(r io.Reader, maxLineBytes int, fn func(line []byte)) (int, error) {
+	if maxLineBytes <= 0 {
+		return 0, errors.New("JSONL line limit must be positive")
+	}
 	oversized := 0
-	br := bufio.NewReaderSize(r, bbotMaxLineBytes)
+	// A small reader buffer avoids reserving the full Gowitness allowance for
+	// ordinary records. The accumulated line is the only value that can grow to
+	// maxLineBytes.
+	br := bufio.NewReaderSize(r, min(maxLineBytes, bbotMaxLineBytes))
+	line := make([]byte, 0, min(maxLineBytes, bbotMaxLineBytes))
+	dropping := false
 	for {
-		line, err := br.ReadSlice('\n')
-		if errors.Is(err, bufio.ErrBufferFull) {
-			for errors.Is(err, bufio.ErrBufferFull) { // drop the rest of the line
-				_, err = br.ReadSlice('\n')
+		chunk, err := br.ReadSlice('\n')
+		if !dropping {
+			if len(line)+len(chunk) <= maxLineBytes {
+				line = append(line, chunk...)
+			} else {
+				dropping = true
+				line = line[:0]
 			}
-			oversized++
-			line = nil
 		}
-		if len(bytes.TrimSpace(line)) > 0 {
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if dropping {
+			oversized++
+		} else if len(bytes.TrimSpace(line)) > 0 {
 			fn(line)
 		}
+		line = line[:0]
+		dropping = false
 		if errors.Is(err, io.EOF) {
 			return oversized, nil
 		}

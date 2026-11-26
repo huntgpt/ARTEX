@@ -386,6 +386,35 @@ func TestScanIngestJSONLLineLimits(t *testing.T) {
 	}
 }
 
+// Gowitness legitimately emits one JSON object containing page HTML and
+// network metadata. It gets a larger, still-bounded allowance than other JSONL
+// formats, and an over-cap record is discarded without losing its neighbours.
+func TestScanIngestGowitnessLargeAndOverLimitRecords(t *testing.T) {
+	large, err := json.Marshal(map[string]any{
+		"url": "https://large.scan-ingest.example.com/", "final_url": "https://large.scan-ingest.example.com/",
+		"response_code": 200, "file_name": "large.png", "probed_at": "2026-11-26T14:00:00Z",
+		"html": strings.Repeat("a", 2<<20),
+	})
+	if err != nil || len(large) <= bbotMaxLineBytes || len(large) >= gowitnessMaxLineBytes {
+		t.Fatalf("large fixture bytes=%d err=%v", len(large), err)
+	}
+	s := parseScan(t, "gowitness-jsonl", string(large)+"\n")
+	if s.Oversized != 0 || s.Skipped != 0 || s.Events != 1 || len(s.BrowserScreenshots) != 1 ||
+		s.BrowserScreenshots[0].FileName != "large.png" {
+		t.Fatalf("large Gowitness record: events=%d skipped=%d oversized=%d screenshots=%+v",
+			s.Events, s.Skipped, s.Oversized, s.BrowserScreenshots)
+	}
+
+	valid := `{"url":"https://neighbour.scan-ingest.example.com/","final_url":"https://neighbour.scan-ingest.example.com/","response_code":200,"file_name":"neighbour.png"}` + "\n"
+	over := `{"url":"https://over.scan-ingest.example.com/","final_url":"https://over.scan-ingest.example.com/","response_code":200,"file_name":"over.png","html":"` +
+		strings.Repeat("b", gowitnessMaxLineBytes) + `"}` + "\n"
+	s = parseScan(t, "gowitness-jsonl", valid+over+valid)
+	if s.Oversized != 1 || s.Skipped != 0 || s.Events != 2 || len(s.BrowserScreenshots) != 2 {
+		t.Fatalf("over-limit Gowitness record: events=%d skipped=%d oversized=%d screenshots=%d",
+			s.Events, s.Skipped, s.Oversized, len(s.BrowserScreenshots))
+	}
+}
+
 // scanURL drops the userinfo and keeps scheme, host, port, path and query; an
 // @ in the path is not userinfo; a URL it refused before is still refused.
 func TestScanURLUserinfo(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -107,5 +108,59 @@ func TestImportBrowserScreenshotPreservesOriginalBytes(t *testing.T) {
 	}
 	if string(imported) != string(original) {
 		t.Fatal("browser screenshot bytes changed during import")
+	}
+}
+
+func TestLargeGowitnessRecordPreservesOriginalScreenshotHash(t *testing.T) {
+	base := t.TempDir()
+	runDir := filepath.Join(base, "tasks", "9", "i12")
+	images := filepath.Join(runDir, "screenshots")
+	if err := os.MkdirAll(images, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(images, "large.png")
+	f, err := os.OpenFile(source, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 3, 3))
+	img.Set(1, 1, color.RGBA{G: 255, A: 255})
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash := sha256.Sum256(original)
+
+	record, err := json.Marshal(map[string]any{
+		"url": "https://large.target.example/", "final_url": "https://large.target.example/",
+		"response_code": 200, "file_name": "large.png", "probed_at": "2026-11-26T10:00:00Z",
+		"html": strings.Repeat("browser-data-not-retained", 10000),
+	})
+	if err != nil || len(record) <= bbotMaxLineBytes {
+		t.Fatalf("fixture bytes=%d err=%v", len(record), err)
+	}
+	s := parseScan(t, "gowitness-jsonl", string(record)+"\n")
+	if s.Oversized != 0 || len(s.BrowserScreenshots) != 1 {
+		t.Fatalf("oversized=%d candidates=%+v", s.Oversized, s.BrowserScreenshots)
+	}
+	tsx := &ToolSet{workBase: base, taskID: 9}
+	artifacts, errs := tsx.importBrowserScreenshots(runDir, "screenshots", s.BrowserScreenshots)
+	if len(errs) != 0 || len(artifacts) != 1 {
+		t.Fatalf("artifacts=%+v errors=%v", artifacts, errs)
+	}
+	artifact := artifacts[0]
+	if artifact.SHA256 != hex.EncodeToString(wantHash[:]) || artifact.ByteSize != int64(len(original)) ||
+		artifact.OriginalName != "large.png" || artifact.SourceURL != "https://large.target.example/" {
+		t.Fatalf("artifact provenance changed: %+v", artifact)
+	}
+	imported, err := os.ReadFile(filepath.Join(base, "evidence", filepath.FromSlash(artifact.Ref)))
+	if err != nil || string(imported) != string(original) {
+		t.Fatalf("imported screenshot differs from source: err=%v", err)
 	}
 }
