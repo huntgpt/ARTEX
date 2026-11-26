@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -418,6 +419,106 @@ func (s *scanIngest) addHttpx(line []byte) {
 	s.fact(fmt.Sprintf("httpx: %s responded with status %d", u, r.StatusCode),
 		map[string]any{"title": r.Title, "tech": r.Tech, "webserver": r.Webserver, "content_length": r.ContentLength,
 			"host": stripUserinfo(r.Host), "ip": r.IP, "tls": r.TLS})
+}
+
+// ---- gowitness v3 --write-jsonl ----
+
+// gowitnessResult intentionally allow-lists only non-sensitive result fields.
+// Real Gowitness records can contain response bodies, headers, cookies, console
+// output and network content. Those fields must never enter ARTEX facts or
+// assets: besides being attacker-controlled, concurrent browser scans may
+// associate ambient session cookies with a different result record.
+type gowitnessResult struct {
+	URL           string `json:"url"`
+	FinalURL      string `json:"final_url"`
+	ResponseCode  int    `json:"response_code"`
+	ContentLength int64  `json:"content_length"`
+	Title         string `json:"title"`
+	FileName      string `json:"file_name"`
+	Failed        bool   `json:"failed"`
+	FailedReason  string `json:"failed_reason"`
+	ProbedAt      string `json:"probed_at"`
+	Protocol      string `json:"protocol"`
+	Technologies  []struct {
+		Value string `json:"value"`
+	} `json:"technologies"`
+	TLS struct {
+		Protocol                 string `json:"protocol"`
+		Cipher                   string `json:"cipher"`
+		SubjectName              string `json:"subject_name"`
+		Issuer                   string `json:"issuer"`
+		ValidFrom                string `json:"valid_from"`
+		ValidTo                  string `json:"valid_to"`
+		EncryptedClientHello     bool   `json:"encrypted_client_hello"`
+		ServerSignatureAlgorithm int    `json:"server_signature_algorithm"`
+	} `json:"tls"`
+}
+
+func safeScreenshotName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || filepath.Base(raw) != raw || strings.Contains(raw, `\`) {
+		return ""
+	}
+	switch strings.ToLower(filepath.Ext(raw)) {
+	case ".jpeg", ".jpg", ".png", ".webp":
+		return raw
+	default:
+		return ""
+	}
+}
+
+func (s *scanIngest) addGowitness(line []byte) {
+	var r gowitnessResult
+	if s.full() {
+		return
+	}
+	if json.Unmarshal(line, &r) != nil || r.Failed {
+		s.Skipped++
+		return
+	}
+	original, _ := scanURL(r.URL)
+	final, host := scanURL(r.FinalURL)
+	if final == "" {
+		final, host = scanURL(r.URL)
+	}
+	if final == "" {
+		s.Skipped++
+		return
+	}
+	fileName := safeScreenshotName(r.FileName)
+	if fileName == "" {
+		s.Skipped++
+		return
+	}
+	var tech []string
+	for _, item := range r.Technologies {
+		if value := bbotToken(item.Value); value != "" {
+			tech = append(tech, value)
+		}
+	}
+	s.Events++
+	s.hosts[host] = true
+	s.urls[final] = true
+	asset := assetInputItem{Type: "service", URL: final, PageTitle: r.Title, Technologies: tech}
+	if r.ResponseCode > 0 {
+		asset.StatusCode = &r.ResponseCode
+	}
+	if r.ContentLength > 0 {
+		asset.ContentLength = &r.ContentLength
+	}
+	s.Assets = append(s.Assets, asset)
+	s.note("screenshots", fmt.Sprintf("%s %d", final, r.ResponseCode))
+	s.fact(fmt.Sprintf("gowitness: screenshot captured for %s with status %d", final, r.ResponseCode), map[string]any{
+		"original_url": original, "final_url": final, "title": r.Title, "screenshot_file": fileName,
+		"content_length": r.ContentLength, "probed_at": r.ProbedAt, "protocol": r.Protocol,
+		"technologies": tech,
+		"tls": map[string]any{
+			"protocol": r.TLS.Protocol, "cipher": r.TLS.Cipher, "subject_name": r.TLS.SubjectName,
+			"issuer": r.TLS.Issuer, "valid_from": r.TLS.ValidFrom, "valid_to": r.TLS.ValidTo,
+			"encrypted_client_hello":     r.TLS.EncryptedClientHello,
+			"server_signature_algorithm": r.TLS.ServerSignatureAlgorithm,
+		},
+	})
 }
 
 // ---- ffuf -of json ----

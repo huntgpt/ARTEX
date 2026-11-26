@@ -51,6 +51,9 @@ func TestSecretsNeverReturnedInClear(t *testing.T) {
 	if !strings.Contains(listResp.Body.String(), `"masked_value":"P@ssw***"`) {
 		t.Fatalf("discovered secret list did not use the 30%% mask: %s", listResp.Body.String())
 	}
+	if !strings.Contains(listResp.Body.String(), `"encrypted_value_present":true`) {
+		t.Fatalf("discovered secret list did not expose encrypted payload presence: %s", listResp.Body.String())
+	}
 	if resp := request("POST", "/api/tasks/"+task.ID+"/secrets/"+strconv.FormatInt(discovered.ID, 10)+"/reveal", `{}`); resp.Code != 400 {
 		t.Fatalf("reveal without a reason must fail, got HTTP %d", resp.Code)
 	}

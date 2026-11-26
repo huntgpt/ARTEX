@@ -117,7 +117,7 @@ func TestIngestScanOutputPG(t *testing.T) {
 	}
 }
 
-// ingest_scan_output (PG), JSON formats: nuclei, httpx and ffuf write their
+// ingest_scan_output (PG), JSON formats: nuclei, httpx, Gowitness and ffuf write their
 // assets and facts; a second ingestion keeps the counters and adds no asset
 // row and no fact.
 func TestIngestScanOutputJSONPG(t *testing.T) {
@@ -138,7 +138,9 @@ func TestIngestScanOutputJSONPG(t *testing.T) {
 	tsx.SetAssetStore(d.Assets(), d.Companies())
 	dir := t.TempDir()
 	tool := tsx.ingestScanOutput()
-	formats := map[string]string{"nuclei-jsonl": nucleiFixture, "httpx-jsonl": httpxFixture, "ffuf-json": ffufFixture}
+	formats := map[string]string{"nuclei-jsonl": nucleiFixture, "httpx-jsonl": httpxFixture, "gowitness-jsonl": gowitnessFixture, "ffuf-json": ffufFixture}
+	wantFacts := map[string]float64{"nuclei-jsonl": 2, "httpx-jsonl": 2, "gowitness-jsonl": 1, "ffuf-json": 2}
+	wantAssets := map[string]float64{"nuclei-jsonl": 2, "httpx-jsonl": 2, "gowitness-jsonl": 1, "ffuf-json": 2}
 	ingest := func(format string) map[string]any {
 		t.Helper()
 		if err := os.WriteFile(filepath.Join(dir, format+".out"), []byte(formats[format]), 0o600); err != nil {
@@ -172,13 +174,13 @@ func TestIngestScanOutputJSONPG(t *testing.T) {
 
 	first := map[string]map[string]any{}
 	for format := range formats {
-		if first[format] = ingest(format); first[format]["facts_written"] != 2.0 || first[format]["assets_written"] != 2.0 {
+		if first[format] = ingest(format); first[format]["facts_written"] != wantFacts[format] || first[format]["assets_written"] != wantAssets[format] {
 			t.Fatalf("%s first ingestion: %v", format, first[format])
 		}
 	}
 	assets, facts := state()
-	if facts != 6 || assets == 0 {
-		t.Fatalf("%d assets and %d facts after the first ingestion, want some assets and 6 facts", assets, facts)
+	if facts != 7 || assets == 0 {
+		t.Fatalf("%d assets and %d facts after the first ingestion, want some assets and 7 facts", assets, facts)
 	}
 	var n int
 	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE url LIKE '%evil%' OR domain LIKE '%evil%'`).Scan(&n); err != nil || n != 0 {
@@ -186,7 +188,7 @@ func TestIngestScanOutputJSONPG(t *testing.T) {
 	}
 	for format := range formats {
 		out := ingest(format)
-		if out["facts_written"] != 0.0 || out["facts_existing"] != 2.0 {
+		if out["facts_written"] != 0.0 || out["facts_existing"] != wantFacts[format] {
 			t.Fatalf("%s re-ingestion: %v", format, out)
 		}
 		for _, k := range []string{"hosts", "urls", "events", "skipped", "oversized_lines", "assets_written"} {

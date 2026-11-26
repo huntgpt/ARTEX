@@ -698,6 +698,8 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.ingestBbot(),
 		// scanner output (nmap -oX) by path, without the raw output.
 		t.ingestScanOutput(),
+		// Non-plaintext secret-vault inventory for reconciling scanner imports.
+		t.listDiscoveredSecrets(),
 		// Operator-supplied AD collector output. Catalogued but deliberately
 		// unbound by default; enabling it imports into the task-private AD graph.
 		t.ingestADObservation(),
@@ -738,6 +740,7 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.setConstraints(),
 		// asset management (handlers guard nil store internally)
 		t.insertAssets(), t.addCompanyScope(), t.listAssets(),
+		t.listDiscoveredSecrets(),
 		t.addFinding(), t.recordFact(),
 		t.addTaskScope(),
 		// list_untested_assets: query untested assets in this task's scope on demand

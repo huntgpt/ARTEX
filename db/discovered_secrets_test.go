@@ -43,6 +43,9 @@ func TestDiscoveredSecretEncryptedListMaskedAndRevealAudited(t *testing.T) {
 	if listed[0].SecretValue != "" || listed[0].SecretValueV2 != "" || listed[0].ScannerRedacted != "P@ssw***" {
 		t.Fatalf("list leaked plaintext or used wrong mask: %+v", listed[0])
 	}
+	if !listed[0].EncryptedValuePresent || !listed[0].EncryptedValueV2Present {
+		t.Fatalf("list did not prove encrypted payload presence: %+v", listed[0])
+	}
 	revealed, err := d.RevealDiscoveredSecret(task.ID, created.ID, "tester", "validation-use", "authorized validation")
 	if err != nil || revealed.SecretValue != "P@ssw0rd" || revealed.SecretValueV2 != "secondary-token" {
 		t.Fatalf("reveal = %+v, %v", revealed, err)

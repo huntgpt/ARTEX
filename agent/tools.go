@@ -2582,6 +2582,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		// (complementing list_untested_assets' "in-scope untested" view with the ability
 		// to "query the whole library by domain/fingerprint/port/status code etc.").
 		t.listAssets(),
+		t.listDiscoveredSecrets(),
 		// add_company_scope: while planning, pull domains/IPs/CIDRs/ICP
 		// registrations/keywords into a company's asset scope (matching assets are
 		// auto-claimed).

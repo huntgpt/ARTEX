@@ -27,23 +27,25 @@ type DiscoveredSecretInput struct {
 }
 
 type DiscoveredSecret struct {
-	ID              int64           `json:"id"`
-	TaskID          int64           `json:"task_id"`
-	Detector        string          `json:"detector"`
-	SourceType      string          `json:"source_type"`
-	SourceName      string          `json:"source_name"`
-	Repository      string          `json:"repository"`
-	FilePath        string          `json:"file_path"`
-	LineNumber      int             `json:"line_number"`
-	CommitHash      string          `json:"commit_hash"`
-	Verified        bool            `json:"verified"`
-	SecretValue     string          `json:"-"`
-	SecretValueV2   string          `json:"-"`
-	SecretSHA256    string          `json:"secret_sha256"`
-	ScannerRedacted string          `json:"scanner_redacted"`
-	Metadata        json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
+	ID                      int64           `json:"id"`
+	TaskID                  int64           `json:"task_id"`
+	Detector                string          `json:"detector"`
+	SourceType              string          `json:"source_type"`
+	SourceName              string          `json:"source_name"`
+	Repository              string          `json:"repository"`
+	FilePath                string          `json:"file_path"`
+	LineNumber              int             `json:"line_number"`
+	CommitHash              string          `json:"commit_hash"`
+	Verified                bool            `json:"verified"`
+	SecretValue             string          `json:"-"`
+	SecretValueV2           string          `json:"-"`
+	SecretSHA256            string          `json:"secret_sha256"`
+	EncryptedValuePresent   bool            `json:"encrypted_value_present"`
+	EncryptedValueV2Present bool            `json:"encrypted_value_v2_present"`
+	ScannerRedacted         string          `json:"scanner_redacted"`
+	Metadata                json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt               time.Time       `json:"created_at"`
+	UpdatedAt               time.Time       `json:"updated_at"`
 }
 
 func (d *DB) UpsertDiscoveredSecret(taskID int64, in DiscoveredSecretInput) (DiscoveredSecret, error) {
@@ -133,7 +135,9 @@ func (d *DB) ReportSecretValuesForTasks(taskIDs []int64) ([]string, error) {
 }
 
 func (d *DB) ListDiscoveredSecrets(taskID int64) ([]DiscoveredSecret, error) {
-	rows, err := d.Query(`SELECT id,task_id,detector,source_type,source_name,repository,file_path,line_number,commit_hash,verified,secret_sha256,scanner_redacted,metadata,created_at,updated_at FROM discovered_secrets WHERE task_id=$1 ORDER BY verified DESC,id DESC`, taskID)
+	rows, err := d.Query(`SELECT id,task_id,detector,source_type,source_name,repository,file_path,line_number,commit_hash,verified,secret_sha256,
+       secret_value <> '', secret_value_v2 <> '', scanner_redacted,metadata,created_at,updated_at
+FROM discovered_secrets WHERE task_id=$1 ORDER BY verified DESC,id DESC`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +145,7 @@ func (d *DB) ListDiscoveredSecrets(taskID int64) ([]DiscoveredSecret, error) {
 	var out []DiscoveredSecret
 	for rows.Next() {
 		var s DiscoveredSecret
-		if err := rows.Scan(&s.ID, &s.TaskID, &s.Detector, &s.SourceType, &s.SourceName, &s.Repository, &s.FilePath, &s.LineNumber, &s.CommitHash, &s.Verified, &s.SecretSHA256, &s.ScannerRedacted, &s.Metadata, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.TaskID, &s.Detector, &s.SourceType, &s.SourceName, &s.Repository, &s.FilePath, &s.LineNumber, &s.CommitHash, &s.Verified, &s.SecretSHA256, &s.EncryptedValuePresent, &s.EncryptedValueV2Present, &s.ScannerRedacted, &s.Metadata, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -175,4 +179,8 @@ func (d *DB) RevealDiscoveredSecret(taskID, secretID int64, actor, action, reaso
 
 func (s *ExplorationStore) UpsertDiscoveredSecret(taskID int64, in DiscoveredSecretInput) (DiscoveredSecret, error) {
 	return s.db.UpsertDiscoveredSecret(taskID, in)
+}
+
+func (s *ExplorationStore) ListDiscoveredSecrets(taskID int64) ([]DiscoveredSecret, error) {
+	return s.db.ListDiscoveredSecrets(taskID)
 }

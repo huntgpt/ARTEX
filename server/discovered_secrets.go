@@ -22,7 +22,9 @@ func discoveredSecretDTO(secret db.DiscoveredSecret) map[string]any {
 		"line_number": secret.LineNumber, "commit_hash": secret.CommitHash,
 		"verified": secret.Verified, "masked_value": masked,
 		"secret_sha256": secret.SecretSHA256, "metadata": secret.Metadata,
-		"created_at": secret.CreatedAt, "updated_at": secret.UpdatedAt,
+		"encrypted_value_present":    secret.EncryptedValuePresent,
+		"encrypted_value_v2_present": secret.EncryptedValueV2Present,
+		"created_at":                 secret.CreatedAt, "updated_at": secret.UpdatedAt,
 	}
 }
 
