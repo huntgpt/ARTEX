@@ -159,6 +159,10 @@ type Engine struct {
 	// supervise runs independent project-lead review before the canonical
 	// Planner. A failure degrades the round but never prevents Planner progress.
 	supervise func(context.Context, *Task, []agent.TriggerEvent, string) (agent.SupervisorAdvice, error)
+	// activityStored receives a successfully committed activity before it is
+	// broadcast. ARTEX uses it to materialize immutable evidence revisions at
+	// ingestion time; failures are logged by the hook and never drop the trace.
+	activityStored func(*Task, db.Activity)
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
 	readiness func() bool
@@ -781,6 +785,9 @@ func (e *Engine) emitActivity(t *Task, r db.Activity) db.Activity {
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now()
 	}
+	if e.activityStored != nil {
+		e.activityStored(t, r)
+	}
 	e.bc.Publish(t.ID, r)
 	e.touch(t.ID)
 	return r
@@ -831,6 +838,12 @@ func (e *Engine) SetAuthoritativeAgentResolver(fn func(t *Task) (*agent.Planner,
 // SetSupervisor installs the optional task project-supervision checkpoint.
 func (e *Engine) SetSupervisor(fn func(context.Context, *Task, []agent.TriggerEvent, string) (agent.SupervisorAdvice, error)) {
 	e.supervise = fn
+}
+
+// SetActivityStoredHook installs the server-owned evidence materializer. It is
+// wired once during startup before task runtimes are restored.
+func (e *Engine) SetActivityStoredHook(fn func(*Task, db.Activity)) {
+	e.activityStored = fn
 }
 
 // snapshotFor returns the planner/worker a task should run on, from the task-router
@@ -1403,6 +1416,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if ectx.Err() != nil && e.isSettling(t.ID) {
 		if err := t.Store.SettleIntentClaim(intent.ID, token, "exhausted"); err != nil {
 			log.Printf("[worker %s] task %s intent #%d failed to persist the timeout-settlement state: %v", name, t.ID, intent.ID, err)
+		} else if err := t.Store.FinishFindingFollowUpRetest(intent.ID, "exhausted", "finding-linked Worker intent exhausted during task-timeout settlement"); err != nil {
+			log.Printf("[worker %s] task %s intent #%d failed to seal exhausted finding retest: %v", name, t.ID, intent.ID, err)
 		}
 		log.Printf("[worker %s] task %s intent #%d ended by task-timeout settlement (exhausted), wrote back %s", name, t.ID, intent.ID, wrote)
 		e.touch(t.ID)
@@ -1413,6 +1428,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if ectx.Err() != nil && isTerminalStatus(e.m.TaskStatus(t.ID)) {
 		if err := t.Store.SettleIntentClaim(intent.ID, token, "stopped"); err != nil {
 			log.Printf("[worker %s] task %s intent #%d failed to persist the terminal stop: %v", name, t.ID, intent.ID, err)
+		} else if err := t.Store.FinishFindingFollowUpRetest(intent.ID, "stopped", "task completed while the finding-linked Worker validation was running"); err != nil {
+			log.Printf("[worker %s] task %s intent #%d failed to seal stopped finding retest: %v", name, t.ID, intent.ID, err)
 		}
 		log.Printf("[worker %s] task %s intent #%d cancelled because the task completed (stopped)", name, t.ID, intent.ID)
 		e.touch(t.ID)
@@ -1429,6 +1446,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	if killed {
 		if err := t.Store.SettleIntentClaim(intent.ID, token, "stopped"); err != nil {
 			log.Printf("[worker %s] task %s intent #%d failed to persist the planner stop: %v", name, t.ID, intent.ID, err)
+		} else if err := t.Store.FinishFindingFollowUpRetest(intent.ID, "stopped", "planner stopped the finding-linked Worker validation"); err != nil {
+			log.Printf("[worker %s] task %s intent #%d failed to seal stopped finding retest: %v", name, t.ID, intent.ID, err)
 		}
 		log.Printf("[worker %s] task %s intent #%d killed (stopped)", name, t.ID, intent.ID)
 		e.touch(t.ID)
@@ -1461,6 +1480,19 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		log.Printf("[worker %s] task %s intent #%d failed to persist terminal state %s: %v", name, t.ID, intent.ID, state, stateErr)
 		if errors.Is(stateErr, db.ErrIntentClaimLost) {
 			return true // taken over: the intent is not finished, its new claimer reports the result
+		}
+	} else {
+		// A direct finding follow-up has a formal retest row created atomically
+		// with its lineage edge. Seal it only after this Worker's fenced intent
+		// result wins; a lost/stale claim must never publish a retest verdict.
+		retestReason := ""
+		if err != nil {
+			retestReason = err.Error()
+		} else if state == "exhausted" {
+			retestReason = "finding-linked Worker intent exhausted its execution budget"
+		}
+		if retestErr := t.Store.FinishFindingFollowUpRetest(intent.ID, state, retestReason); retestErr != nil {
+			log.Printf("[worker %s] task %s intent #%d failed to seal finding retest: %v", name, t.ID, intent.ID, retestErr)
 		}
 	}
 	log.Printf("[worker %s] task %s intent #%d finished: %s (wrote back %s)", name, t.ID, intent.ID, state, wrote)

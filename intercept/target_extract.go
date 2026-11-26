@@ -34,7 +34,7 @@ var noTargetTools = toolSet(
 	"list_task_findings", "add_task_hint", "get_task_worker_trace",
 	"list_task_worker_traces", "search_task_worker_traces", "get_task_node_detail",
 	"update_finding_report", "get_finding_traffic", "bind_finding_traffic",
-	"get_finding_retest_context", "record_finding_retest_result", "ingest_retest_browser_evidence",
+	"get_finding_retest_context", "record_finding_retest_result", "record_finding_followup_retest_result", "ingest_retest_browser_evidence",
 	"delete_assets_by_host", "create_skill", "update_skill_file",
 	// the operator runs the command, not the platform
 	"ask_operator",

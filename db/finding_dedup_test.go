@@ -50,6 +50,21 @@ func TestAutomaticFindingDedupStatusOnlyUsesActionableFindings(t *testing.T) {
 	}
 }
 
+func TestExplicitFindingExtensionRequiresCompatibleClass(t *testing.T) {
+	c := findingDedupCandidate{VulnClass: "Credential Exposure"}
+	for _, in := range []RecordFindingInput{
+		{VulnClass: "credential-exposure"},
+		{VulnClass: ""}, // legacy/direct callers may omit it
+	} {
+		if !explicitFindingExtensionCompatible(in, c) {
+			t.Fatalf("compatible extension rejected: %+v", in)
+		}
+	}
+	if explicitFindingExtensionCompatible(RecordFindingInput{VulnClass: "SQL injection"}, c) {
+		t.Fatal("unrelated vulnerability class accepted for explicit extension")
+	}
+}
+
 func openFindingDedupTestDB(t *testing.T) *DB {
 	t.Helper()
 	d, err := Open(testDSN(t))
@@ -352,10 +367,16 @@ func TestRecordFindingExplicitCanonicalIDIsSameTaskOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	reused, err := es.RecordFinding(t.Context(), RecordFindingInput{
-		TaskID: task.ID, ExistingFindingID: first.FindingID, VulnClass: "renamed", Name: "follow up", Severity: "low", Evidence: "extra",
+		TaskID: task.ID, ExistingFindingID: first.FindingID, VulnClass: "x", Name: "follow up", Severity: "low", Evidence: "extra",
 	})
 	if err != nil || !reused.ReusedExisting || reused.FindingID != first.FindingID {
 		t.Fatalf("explicit canonical reuse=%+v err=%v", reused, err)
+	}
+	if _, err := es.RecordFinding(t.Context(), RecordFindingInput{
+		TaskID: task.ID, ExistingFindingID: first.FindingID, VulnClass: "unrelated class",
+		Name: "different defect", Severity: "critical", Evidence: "unrelated proof",
+	}); err == nil {
+		t.Fatal("explicit existing_finding_id merged an unrelated vulnerability class")
 	}
 	// Explicit IDs intentionally may extend a terminal canonical finding; this is
 	// useful for retest evidence and does not silently choose a hidden record.
@@ -373,5 +394,60 @@ func TestRecordFindingExplicitCanonicalIDIsSameTaskOnly(t *testing.T) {
 		TaskID: other.ID, ExistingFindingID: first.FindingID, VulnClass: "x", Name: "canonical", Severity: "low",
 	}); err == nil {
 		t.Fatal("cross-task existing_finding_id was accepted")
+	}
+}
+
+func TestFindingIntentsKeepsOriginalProducerForLegacyMultipleYields(t *testing.T) {
+	d := openFindingDedupTestDB(t)
+	task, es, assetID := findingDedupFixture(t, d, "legacy-multiple-producers")
+	// Give the legacy follow-up the lower node id. Producer selection must follow
+	// edge creation order, not assume that the smallest source id is canonical.
+	legacyFollowup, err := es.AddIntent(map[string]any{"summary": "legacy follow-up"}, 1, []int64{assetID}, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := es.AddIntent(map[string]any{"summary": "original producer"}, 1, []int64{assetID}, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err := es.RecordFinding(t.Context(), RecordFindingInput{
+		TaskID: task.ID, IntentID: original, VulnClass: "configuration", Name: "producer fixture",
+		Severity: "medium", AssetIDs: []int64{assetID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the legacy graph shape that existed before follow-ups switched to
+	// finding --derived_from--> intent. The oldest intent is the original producer.
+	if _, err := d.Exec(`INSERT INTO exploration_edges(exploration_id,src_id,rel,dst_id,created_at)
+		VALUES($1,$2,$3,$4,now()+interval '1 second')`, task.ExplorationID, legacyFollowup, RelYields, recorded.NodeID); err != nil {
+		t.Fatal(err)
+	}
+	producers, err := es.FindingIntents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := producers[recorded.NodeID]; got != original {
+		t.Fatalf("legacy multiple producers resolved to intent %d, want original %d", got, original)
+	}
+	if _, err := d.Exec(`UPDATE exploration_nodes SET state='done' WHERE id=$1`, legacyFollowup); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := es.FindingIntentsTerminal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := terminal[recorded.NodeID]; ok {
+		t.Fatal("terminal lookup substituted a later terminal follow-up for the live original producer")
+	}
+	if _, err := d.Exec(`UPDATE exploration_nodes SET state='done' WHERE id=$1`, original); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err = es.FindingIntentsTerminal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := terminal[recorded.NodeID]; got != original {
+		t.Fatalf("terminal producer resolved to intent %d, want original %d", got, original)
 	}
 }

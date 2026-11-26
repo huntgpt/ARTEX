@@ -486,7 +486,14 @@ func intentAssetIDs(intent *db.Node) []int64 {
 }
 
 func renderIntentTask(intent *db.Node) string {
-	return fmt.Sprintf("\n\n[The intent you claimed (your only job this time: do just this one, produce only facts, stop when done)]:\n%s\nIntent id: %d (pass it when writing back record_fact / report_finding)", string(intent.Payload), intent.ID)
+	msg := fmt.Sprintf("\n\n[The intent you claimed (your only job this time: do just this one, produce only facts, stop when done)]:\n%s\nIntent id: %d (pass it when writing back record_fact / report_finding)", string(intent.Payload), intent.ID)
+	var p struct {
+		SourceFindingID int64 `json:"source_finding_id"`
+	}
+	if json.Unmarshal(intent.Payload, &p) == nil && p.SourceFindingID > 0 {
+		msg += "\nThis is a formal finding-linked validation run. Before finishing, call record_finding_followup_retest_result exactly once with reproduced, fixed, or inconclusive and cite only evidence observed by this run. If the prerequisites are missing or the target cannot be compared, save inconclusive with the concrete blocker; do not guess a verdict."
+	}
+	return msg
 }
 
 // renderWorkerGraphOverview folds the global situational snapshot into the worker's

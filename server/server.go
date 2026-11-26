@@ -225,6 +225,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		return b.pl, b.wk
 	})
 	s.engine.SetSupervisor(s.runSupervisorCheckpoint)
+	s.engine.SetActivityStoredHook(s.reconcileActivityArtifactEvidence)
 	// Global readiness (Ready()/llm_configured): a global active LLM provider is
 	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
 	s.engine.SetReadiness(func() bool {
@@ -323,6 +324,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// seeded browser MCP on first run). Async so it never blocks startup.
 	go s.discoverEmptyMCPsOnStartup()
 	s.restoreTaskRuntimes()
+	go s.reconcileLegacyFindingArtifactEvidence()
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	s.wireInterceptReviewer() // LLM fallback approval: commands that hit no interception rule go to the model for judgment

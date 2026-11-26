@@ -59,8 +59,11 @@ func (s *ExplorationStore) DeterministicFindingMatch(ctx context.Context, in Rec
 // reuseExistingFindingTx deterministically extends an existing same-task finding
 // before the optional LLM triage path can fail open. Automatic matching is
 // intentionally conservative: a non-empty normalized class and name and the
-// complete non-empty asset set must match. An explicit id only has to be a live
-// finding in the same task.
+// complete non-empty asset set must match. An explicit id has to be a live
+// finding in the same task whose vulnerability class is compatible with the
+// proposed extension. This prevents a stale or hallucinated id from merging an
+// unrelated defect while still allowing a follow-up to refine the finding name
+// and affected asset set.
 func reuseExistingFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, prepared []PreparedTrafficEvidence) (*RecordedFinding, bool, error) {
 	if in.TaskID <= 0 {
 		if in.ExistingFindingID > 0 {
@@ -102,6 +105,9 @@ func reuseExistingFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInp
 				// a fixed finding). A duplicate row is never canonical.
 				if candidates[i].Status == FindingDuplicate {
 					return nil, false, fmt.Errorf("existing_finding_id %d is itself marked duplicate; reference its canonical finding", in.ExistingFindingID)
+				}
+				if !explicitFindingExtensionCompatible(in, candidates[i]) {
+					return nil, false, fmt.Errorf("existing_finding_id %d has vulnerability class %q, which is incompatible with extension class %q", in.ExistingFindingID, candidates[i].VulnClass, in.VulnClass)
 				}
 				match = &candidates[i]
 				break
@@ -209,6 +215,16 @@ func deterministicFindingMatch(in RecordFindingInput, c findingDedupCandidate) b
 		return false
 	}
 	return identicalNonEmptyAssetSet(in.AssetIDs, c.AssetIDs)
+}
+
+// explicitFindingExtensionCompatible is deliberately narrower than trusting an
+// explicit database id alone. report_finding requires vulnclass, so a non-empty
+// canonical class is a stable semantic anchor even when a retest reasonably
+// rephrases the finding name or adds a newly affected asset. Legacy records with
+// an empty class remain extendable rather than becoming impossible to repair.
+func explicitFindingExtensionCompatible(in RecordFindingInput, c findingDedupCandidate) bool {
+	incoming, canonical := normalizeFindingText(in.VulnClass), normalizeFindingText(c.VulnClass)
+	return incoming == "" || canonical == "" || incoming == canonical
 }
 
 // Automatic reuse must never hide fresh evidence under a terminal disposition.

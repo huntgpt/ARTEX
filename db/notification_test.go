@@ -882,14 +882,11 @@ func TestClaimDigestBatchHonorsCallerLimit(t *testing.T) {
 	}
 }
 
-// TestFinishFindingRetestEmitsStatusChange covers an integrity gap found in audit:
-// when a retest concludes "fixed", the status does change, but that UPDATE wrote
-// directly, bypassing the notifying version — so channels configured with
-// on_status_change never got pushes for this kind of transition; the status quietly
-// changed in the UI and ops only found out when they opened the platform.
-//
-// This case pins down "every status-changing path must register a status-change event".
-func TestFinishFindingRetestEmitsStatusChange(t *testing.T) {
+// A model-authored fixed verdict is retained in formal retest history but must
+// not change the human finding disposition. Consequently it must not emit a
+// misleading status-change notification either; independent class-aware
+// verification or a human may perform that transition through the normal path.
+func TestFinishFindingRetestDoesNotEmitUnsupportedStatusChange(t *testing.T) {
 	d := notifyTestDB(t)
 	ctx := context.Background()
 
@@ -936,26 +933,16 @@ func TestFinishFindingRetestEmitsStatusChange(t *testing.T) {
 	if err := d.QueryRow(`SELECT status FROM findings WHERE id=$1`, f.FindingID).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	if status != FindingFixed {
-		t.Fatalf("status should be fixed after the retest judged fixed, got %s", status)
+	if status != FindingPending {
+		t.Fatalf("model retest verdict changed finding status, got %s", status)
 	}
 
-	// Key assertion: there must be a status-change event with correct from/to.
-	var snapshot []byte
-	err = d.QueryRow(`SELECT snapshot FROM notification_events WHERE finding_id=$1 AND kind=$2 ORDER BY id DESC LIMIT 1`,
-		f.FindingID, notify.EventFindingStatusChanged).Scan(&snapshot)
-	if err != nil {
-		t.Fatalf("a retest judging fixed should register a status-change delivery event (otherwise channels with on_status_change never hear about it): %v", err)
-	}
-	var snap notify.Snapshot
-	if err := json.Unmarshal(snapshot, &snap); err != nil {
+	var count int
+	if err := d.QueryRow(`SELECT count(*) FROM notification_events WHERE finding_id=$1 AND kind=$2`,
+		f.FindingID, notify.EventFindingStatusChanged).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if snap.FromStatus != "pending" || snap.ToStatus != FindingFixed {
-		t.Fatalf("wrong status transition in snapshot: %s → %s", snap.FromStatus, snap.ToStatus)
-	}
-	// The snapshot must carry the fields needed for rendering, otherwise the push is an empty shell.
-	if snap.Name != "retest target" || snap.Severity != "high" {
-		t.Fatalf("snapshot lacks render fields: %+v", snap)
+	if count != 0 {
+		t.Fatalf("unsupported model verdict emitted %d status-change notifications", count)
 	}
 }

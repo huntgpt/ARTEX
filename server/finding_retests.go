@@ -167,7 +167,7 @@ func (s *Server) findingRetestTools() []actool.CoreTool {
 				}
 				return jsonResult(map[string]any{"retest": r, "current_constraints": constraints})
 			}),
-		wrTool("record_finding_retest_result", "Save the single conclusion for the current retest session; the original vulnerability evidence and report stay unchanged. When the session ends successfully with a fixed verdict, the system automatically sets the vulnerability status to Fixed; other verdicts keep the original status. Evidence from this actual check is required; when it cannot be confirmed, state the blocking reason.",
+		wrTool("record_finding_retest_result", "Save the single conclusion for the current retest session; the original finding, report, handling status, and machine-verification status stay unchanged. ARTEX preserves this verdict as evidence for the independent class-aware verifier or human review. Evidence from this actual check is required; when it cannot be confirmed, state the blocking reason.",
 			objSchema(map[string]any{
 				"verdict":  map[string]any{"type": "string", "enum": []string{"reproduced", "fixed", "inconclusive"}},
 				"summary":  strParam("summary of this retest conclusion"),

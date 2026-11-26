@@ -15,9 +15,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { intlLocale, t } from "@/i18n";
 import { api } from "@/lib/api";
 import type { FindingRetest } from "@/lib/types";
-import { intlLocale, t } from "@/i18n";
 
 const statusLabels = {
   pending: t("Waiting to start"),
@@ -30,6 +30,24 @@ const verdictLabels = { reproduced: t("Still reproducible"), fixed: t("Fixed"), 
 
 function active(r: FindingRetest) {
   return r.status === "pending" || r.status === "running";
+}
+
+function RetestSource({ item }: { item: FindingRetest }) {
+  if (item.conversation_id != null) {
+    return (
+      <Button asChild variant="ghost" size="sm" className="ml-auto">
+        <Link href={`/chat?c=${item.conversation_id}`}>{t("View session")}</Link>
+      </Button>
+    );
+  }
+  if (item.source_intent_id != null) {
+    return (
+      <span className="ml-auto text-muted-foreground text-xs">
+        {t("Worker intent #{id}", { id: item.source_intent_id })}
+      </span>
+    );
+  }
+  return <span className="text-muted-foreground text-xs">{t("Conversation deleted")}</span>;
 }
 
 export function FindingRetestPanel({
@@ -86,7 +104,9 @@ export function FindingRetestPanel({
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
         <div className="flex flex-col gap-1.5">
           <CardTitle>{t("Vulnerability retest")}</CardTitle>
-          <CardDescription>{t("Verifies the current state in a separate session, keeping each retest's verdict and evidence.")}</CardDescription>
+          <CardDescription>
+            {t("Verifies the current state in a separate session, keeping each retest's verdict and evidence.")}
+          </CardDescription>
         </div>
         {running?.conversation_id != null ? (
           <Button asChild variant="outline" size="sm">
@@ -119,7 +139,9 @@ export function FindingRetestPanel({
           <Empty>
             <EmptyHeader>
               <EmptyTitle>{t("No retest records")}</EmptyTitle>
-              <EmptyDescription>{t("Once the fix is deployed, start a retest to compare new and old evidence.")}</EmptyDescription>
+              <EmptyDescription>
+                {t("Once the fix is deployed, start a retest to compare new and old evidence.")}
+              </EmptyDescription>
             </EmptyHeader>
           </Empty>
         ) : null}
@@ -137,13 +159,7 @@ export function FindingRetestPanel({
                   <span className="text-muted-foreground text-xs">
                     #{item.id} · {new Date(item.created_at).toLocaleString(intlLocale)}
                   </span>
-                  {item.conversation_id != null ? (
-                    <Button asChild variant="ghost" size="sm" className="ml-auto">
-                      <Link href={`/chat?c=${item.conversation_id}`}>{t("View session")}</Link>
-                    </Button>
-                  ) : (
-                    <span className="text-muted-foreground text-xs">{t("Conversation deleted")}</span>
-                  )}
+                  <RetestSource item={item} />
                 </div>
                 {item.status === "completed" && item.summary ? (
                   <p className="whitespace-pre-wrap break-words text-sm">{item.summary}</p>

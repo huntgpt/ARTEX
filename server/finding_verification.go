@@ -18,10 +18,9 @@ import (
 	"github.com/Autumn-27/artex/evidence"
 )
 
-// S1 receipt check. A finding is verified only when a proof/verification
-// traffic body is bound, the agent declared POE L3 or higher, and every quote
-// appears verbatim (after whitespace normalization) in one of those response
-// bodies. Anything else is unverified, blocked or not_assessed, with a note.
+// Verification is class-aware. Exploitation findings keep the strict S1 bound
+// HTTP-response/POE receipt check below. Non-HTTP classes are routed to
+// independent fail-closed policies backed by immutable audited artifacts.
 
 const (
 	verificationMinPOE        = 3
@@ -138,6 +137,16 @@ func readBoundResponse(store *evidence.Store, snap db.TrafficEvidenceSnapshot) (
 // its bound traffic and the quotes the agent supplied. poe is the declared POE
 // level (0 when absent). It never returns "verified" unless every rule passes.
 func (s *Server) assessFindingVerification(ctx context.Context, findingID int64, poe int, quotes []string) (status, note string) {
+	finding, err := s.m.pg.GetFinding(findingID)
+	if err != nil {
+		return db.VerificationNotAssessed, "finding read error: " + err.Error()
+	}
+	if finding == nil {
+		return db.VerificationNotAssessed, "finding does not exist"
+	}
+	if profile := findingVerificationProfile(finding); profile != verificationExploitation {
+		return s.assessArtifactFindingVerification(finding, quotes)
+	}
 	tr, err := s.m.pg.GetFindingTraffic(ctx, findingID)
 	if err != nil {
 		return db.VerificationNotAssessed, "binding read error: " + err.Error()
@@ -240,6 +249,21 @@ func (s *Server) seedFindingVerificationSchema() {
 WHERE key=$1 AND system AND NOT(COALESCE(schema->'properties','{}'::jsonb) ? $2)`, "update_finding_report", name, string(properties[name]))
 		if err != nil {
 			log.Printf("[verification] upgrade update_finding_report.%s: %v", name, err)
+		}
+	}
+	// Upgrade only the former built-in wording. Updating the leaf instead of the
+	// whole property preserves user schema edits; custom descriptions never
+	// match this exact legacy copy and are left untouched.
+	const legacyQuotesDescription = "exact lines copied from a bound proof/verification response body (get_finding_traffic). Never from memory; the server checks each one verbatim after whitespace normalization."
+	var current struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(properties["evidence_quotes"], &current); err == nil && current.Description != "" {
+		if _, err := s.m.pg.Exec(`UPDATE tools
+SET schema=jsonb_set(schema,ARRAY['properties','evidence_quotes','description'],to_jsonb($1::text),true),updated_at=now()
+WHERE key='update_finding_report' AND system
+  AND schema#>>'{properties,evidence_quotes,description}'=$2`, current.Description, legacyQuotesDescription); err != nil {
+			log.Printf("[verification] upgrade class-aware evidence quote guidance: %v", err)
 		}
 	}
 }

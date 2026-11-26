@@ -546,6 +546,12 @@ func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int
 		VALUES ($1,$2,$3,$4)`, s.expID, liveNodeID, RelDerivedFrom, intentID); err != nil {
 		return 0, Activity{}, err
 	}
+	// A finding-linked Worker run is a formal validation attempt, not an
+	// untracked side branch. Create its pending retest record atomically with the
+	// exact lineage edge; non-actionable dispositions are deliberately excluded.
+	if err := createFindingFollowUpRetestTx(tx, findingID, intentID, description); err != nil {
+		return 0, Activity{}, err
+	}
 
 	audit.NodeID = &intentID
 	if summary := strings.TrimSpace(audit.Summary); summary != "" {

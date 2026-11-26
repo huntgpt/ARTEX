@@ -1982,6 +1982,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
         id: mockRetests.length + 1,
         finding_id: findingID,
         conversation_id: conversationID,
+        source_intent_id: null,
         status: "running",
         verdict: "",
         notes: String(b.notes ?? ""),

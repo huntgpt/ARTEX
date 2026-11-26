@@ -157,6 +157,10 @@ func (s *Server) deepenFinding(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "finding origin task or node is no longer available")
 		return
 	}
+	if errors.Is(err, db.ErrFindingRetestActive) {
+		writeErr(w, 409, err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

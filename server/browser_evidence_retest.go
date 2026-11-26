@@ -105,6 +105,9 @@ func (s *Server) toolIngestRetestBrowserEvidence() actool.CoreTool {
 				return actool.Errorf("browser evidence was stored but its finding audit record could not be written"), nil
 			}
 			activity.ID = activityID
+			if err := s.reconcileFindingArtifactEvidence(ctx, finding.ID); err != nil {
+				return actool.Errorf("browser evidence was stored but its finding evidence revision could not be recorded"), nil
+			}
 			if s.engine != nil {
 				s.engine.Broadcaster().Publish(task.ID, activity)
 				s.engine.touch(task.ID)

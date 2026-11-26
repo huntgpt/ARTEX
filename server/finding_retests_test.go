@@ -263,7 +263,7 @@ func TestRetestStopsFailuresAndNoVerdict(t *testing.T) {
 	}
 }
 
-func TestRetestFixedUpdatesFindingThroughConversation(t *testing.T) {
+func TestRetestFixedVerdictRequiresIndependentFindingDisposition(t *testing.T) {
 	s, fid := newRetestServer(t)
 	var calls atomic.Int32
 	setRetestProvider(s, retestProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
@@ -278,8 +278,8 @@ func TestRetestFixedUpdatesFindingThroughConversation(t *testing.T) {
 	}
 	waitRetestIdle(t, s)
 	f, err := s.m.pg.GetFinding(fid)
-	if err != nil || f.Status != db.FindingFixed || f.Evidence != "original proof" {
-		t.Fatalf("fixed finding=%+v err=%v", f, err)
+	if err != nil || f.Status != db.FindingPending || f.Evidence != "original proof" {
+		t.Fatalf("model retest verdict changed finding without independent verification: finding=%+v err=%v", f, err)
 	}
 	// The new manual status is also accepted by the existing update API.
 	w = retestRequest(s.patchFinding, "PATCH", fid, `{"status":"fixed"}`)

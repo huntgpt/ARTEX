@@ -109,7 +109,8 @@ func TestFindingStatusReopensProvedGoals(t *testing.T) {
 
 	t.Run("retest_path_uses_same_tx_semantics", func(t *testing.T) {
 		_, es, fid, fnid, gid := newTaskWithProvedGoal(t, "retest")
-		// Retest concluding "fixed" calls SetFindingStatusTx(FindingFixed): goal stays met.
+		// A model-authored "fixed" retest verdict is evidence only. It cannot
+		// change the human finding disposition or reopen/settle goals by itself.
 		rt, conv, _, err := d.CreateFindingRetest(ctx, fid, "test")
 		if err != nil {
 			t.Fatal(err)
@@ -128,6 +129,9 @@ func TestFindingStatusReopensProvedGoals(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertGoalState(t, es, gid, "met")
+		if f, err := d.GetFinding(fid); err != nil || f.Status == FindingFixed {
+			t.Fatalf("unsupported fixed verdict changed disposition: finding=%+v err=%v", f, err)
+		}
 
 		// In-transaction rollback check: SetFindingStatusTx(FindingFalsePositive) reopens inside
 		// the same tx, and rolling back the tx leaves the goal met.

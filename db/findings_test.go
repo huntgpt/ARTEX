@@ -645,6 +645,48 @@ func TestAddFindingFollowUpIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	node, err := store.GetNode(intentID)
+	if err != nil || node == nil {
+		t.Fatalf("GetNode: node=%+v err=%v", node, err)
+	}
+	if node.Kind != KindIntent || node.Priority != 10 || node.State != "open" || node.Origin != "human" {
+		t.Fatalf("follow-up intent metadata: %+v", node)
+	}
+	var retestID int64
+	var sourceIntentID *int64
+	var retestStatus string
+	if err := d.QueryRow(`SELECT id,source_intent_id,status FROM finding_retests WHERE finding_id=$1`, findingID).
+		Scan(&retestID, &sourceIntentID, &retestStatus); err != nil {
+		t.Fatal(err)
+	}
+	if sourceIntentID == nil || *sourceIntentID != intentID || retestStatus != "pending" {
+		t.Fatalf("formal follow-up retest provenance: id=%d source=%v status=%q", retestID, sourceIntentID, retestStatus)
+	}
+	var beforeDuplicate int
+	if err := d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, task.ExplorationID).Scan(&beforeDuplicate); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AddFindingFollowUpIntent(findingID, findingNodeID, "duplicate while active", Activity{
+		Worker: "system", Kind: "text", Summary: "duplicate while active",
+	}); !errors.Is(err, ErrFindingRetestActive) {
+		t.Fatalf("second active follow-up: want ErrFindingRetestActive, got %v", err)
+	}
+	var afterDuplicate int
+	if err := d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, task.ExplorationID).Scan(&afterDuplicate); err != nil {
+		t.Fatal(err)
+	}
+	if afterDuplicate != beforeDuplicate {
+		t.Fatalf("active-retest rejection leaked graph node: %d -> %d", beforeDuplicate, afterDuplicate)
+	}
+	if _, err := store.ClaimIntentToken(intentID, "test-worker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordFindingFollowUpRetestResult(t.Context(), intentID, "inconclusive", "prerequisite unavailable", "actual check was blocked by missing prerequisite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishFindingFollowUpRetest(intentID, "done", ""); err != nil {
+		t.Fatal(err)
+	}
 	secondID, _, err := store.AddFindingFollowUpIntent(findingID, findingNodeID, "Go deeper via another path", Activity{
 		Worker: "system", Kind: "text", Summary: "Manually submitted vulnerability deep-exploitation intent", Detail: "Go deeper via another path",
 	})
@@ -654,16 +696,15 @@ func TestAddFindingFollowUpIntent(t *testing.T) {
 	if secondID == intentID {
 		t.Fatal("repeated follow-up submissions must create distinct intents")
 	}
+	if _, err := store.ClaimIntentToken(secondID, "test-worker-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishFindingFollowUpRetest(secondID, "done", ""); err != nil {
+		t.Fatal(err)
+	}
 	expectedAuditSummary := fmt.Sprintf("%s #%d", auditInput.Summary, intentID)
 	if audit.ID <= 0 || audit.NodeID == nil || *audit.NodeID != intentID || audit.CreatedAt.IsZero() || audit.Summary != expectedAuditSummary {
 		t.Fatalf("persisted audit mismatch: %+v", audit)
-	}
-	node, err := store.GetNode(intentID)
-	if err != nil || node == nil {
-		t.Fatalf("GetNode: node=%+v err=%v", node, err)
-	}
-	if node.Kind != KindIntent || node.Priority != 10 || node.State != "open" || node.Origin != "human" {
-		t.Fatalf("follow-up intent metadata: %+v", node)
 	}
 	var anchorCount, edgeCount int
 	if err := d.QueryRow(`SELECT COUNT(*) FROM exploration_anchors WHERE node_id=$1 AND asset_id=$2`, intentID, assetID).Scan(&anchorCount); err != nil {

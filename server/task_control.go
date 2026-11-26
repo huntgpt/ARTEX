@@ -219,6 +219,9 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 				return out, err
 			}
 		}
+		if err := t.Store.FinishFindingFollowUpRetest(iid, "stopped", "operator deleted the finding-linked Worker validation: "+reason); err != nil {
+			return out, err
+		}
 		summary := intentSummaryOf(node)
 		if mode == "hard" {
 			cleanup, err := t.Store.CancelIntent(iid)

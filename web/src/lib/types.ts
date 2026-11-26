@@ -912,6 +912,7 @@ export interface FindingRetest {
   id: number;
   finding_id: number;
   conversation_id: number | null;
+  source_intent_id: number | null;
   status: "pending" | "running" | "completed" | "failed" | "stopped";
   verdict: "" | "reproduced" | "fixed" | "inconclusive";
   notes: string;

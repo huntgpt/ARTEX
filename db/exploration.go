@@ -1232,10 +1232,12 @@ ORDER BY id`, s.expID, nodeID, RelDerivedFrom)
 // intent --yields--> finding edge; report_finding links it). Findings with no
 // producing intent are absent. Precise (JOIN, no edge-scan limit).
 func (s *ExplorationStore) FindingIntents() (map[int64]int64, error) {
-	rows, err := s.db.Query(`SELECT e.dst_id, e.src_id
+	rows, err := s.db.Query(`SELECT DISTINCT ON (e.dst_id) e.dst_id, e.src_id
 FROM exploration_edges e
-JOIN exploration_nodes n ON n.id = e.dst_id AND n.exploration_id = e.exploration_id
-WHERE e.exploration_id=$1 AND e.rel=$2 AND n.kind='finding'`, s.expID, RelYields)
+JOIN exploration_nodes finding ON finding.id=e.dst_id AND finding.exploration_id=e.exploration_id
+JOIN exploration_nodes intent ON intent.id=e.src_id AND intent.exploration_id=e.exploration_id
+WHERE e.exploration_id=$1 AND e.rel=$2 AND finding.kind='finding' AND intent.kind='intent'
+ORDER BY e.dst_id, e.created_at, e.src_id`, s.expID, RelYields)
 	if err != nil {
 		return nil, err
 	}
@@ -1309,12 +1311,18 @@ LIMIT $4`, s.expID, RelYields, KindFact, limit)
 // lineage only when the producing intent has reached an immutable terminal
 // state. This keeps a source task's live worker topology private.
 func (s *ExplorationStore) FindingIntentsTerminal() (map[int64]int64, error) {
-	rows, err := s.db.Query(`SELECT e.dst_id, e.src_id
-	FROM exploration_edges e
-	JOIN exploration_nodes finding ON finding.id=e.dst_id AND finding.exploration_id=e.exploration_id
-	JOIN exploration_nodes intent ON intent.id=e.src_id AND intent.exploration_id=e.exploration_id
-	WHERE e.exploration_id=$1 AND e.rel=$2 AND finding.kind='finding'
-	  AND intent.kind='intent' AND intent.state IN ('done','blocked','exhausted','stopped')`, s.expID, RelYields)
+	rows, err := s.db.Query(`WITH producers AS (
+		SELECT DISTINCT ON (e.dst_id) e.dst_id AS finding_id, e.src_id AS intent_id
+		FROM exploration_edges e
+		JOIN exploration_nodes finding ON finding.id=e.dst_id AND finding.exploration_id=e.exploration_id
+		JOIN exploration_nodes intent ON intent.id=e.src_id AND intent.exploration_id=e.exploration_id
+		WHERE e.exploration_id=$1 AND e.rel=$2 AND finding.kind='finding' AND intent.kind='intent'
+		ORDER BY e.dst_id, e.created_at, e.src_id
+	)
+	SELECT producers.finding_id, producers.intent_id
+	FROM producers
+	JOIN exploration_nodes intent ON intent.id=producers.intent_id AND intent.exploration_id=$1
+	WHERE intent.state IN ('done','blocked','exhausted','stopped')`, s.expID, RelYields)
 	if err != nil {
 		return nil, err
 	}

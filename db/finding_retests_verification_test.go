@@ -1,9 +1,6 @@
 package db
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // runRetest drives one retest session to its terminal state with the given
 // staged verdict, using the same calls the server makes, and returns its ID.
@@ -37,28 +34,33 @@ func verificationOf(t *testing.T, d *DB, fid int64) (status string, poe int, not
 	return
 }
 
-func TestRetestReproducedVerifiesUnverifiedFinding(t *testing.T) {
-	d, fid := retestDB(t)
-	runRetest(t, d, fid, "reproduced", "still exploitable with the original PoC", "completed")
-	status, _, note := verificationOf(t, d, fid)
-	if status != VerificationVerified || !strings.Contains(note, "retest") || !strings.Contains(note, "reproduced") {
-		t.Fatalf("verification after reproduced: status=%s note=%q", status, note)
-	}
-}
-
-func TestRetestFixedVerifiesAndKeepsFixedStatus(t *testing.T) {
-	d, fid := retestDB(t)
-	runRetest(t, d, fid, "fixed", "payload now rejected, control still works", "completed")
-	status, _, note := verificationOf(t, d, fid)
-	if status != VerificationVerified || !strings.Contains(note, "retest") || !strings.Contains(note, "fixed") {
-		t.Fatalf("verification after fixed: status=%s note=%q", status, note)
-	}
-	f, err := d.GetFinding(fid)
-	if err != nil || f == nil {
-		t.Fatalf("get finding: %v", err)
-	}
-	if f.Status != FindingFixed {
-		t.Fatalf("human status after fixed retest = %q, want %q", f.Status, FindingFixed)
+func TestRetestModelVerdictsDoNotPromoteVerificationOrDisposition(t *testing.T) {
+	for _, verdict := range []string{"reproduced", "fixed"} {
+		t.Run(verdict, func(t *testing.T) {
+			d, fid := retestDB(t)
+			if _, err := d.SetFindingStatus(fid, FindingInProgress); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.SetFindingVerification(fid, VerificationBlocked, 2, "independent evidence missing"); err != nil {
+				t.Fatal(err)
+			}
+			rid := runRetest(t, d, fid, verdict, "model-authored retest conclusion", "completed")
+			status, poe, note := verificationOf(t, d, fid)
+			if status != VerificationBlocked || poe != 2 || note != "independent evidence missing" {
+				t.Fatalf("%s verdict promoted verification: status=%s poe=%d note=%q", verdict, status, poe, note)
+			}
+			f, err := d.GetFinding(fid)
+			if err != nil || f == nil || f.Status != FindingInProgress {
+				t.Fatalf("%s verdict changed human disposition: finding=%+v err=%v", verdict, f, err)
+			}
+			var gotVerdict, gotStatus string
+			if err := d.QueryRow(`SELECT verdict,status FROM finding_retests WHERE id=$1`, rid).Scan(&gotVerdict, &gotStatus); err != nil {
+				t.Fatal(err)
+			}
+			if gotVerdict != verdict || gotStatus != "completed" {
+				t.Fatalf("formal verdict not preserved: verdict=%q status=%q", gotVerdict, gotStatus)
+			}
+		})
 	}
 }
 
@@ -91,15 +93,15 @@ func TestRetestFailedOrStoppedLeavesVerificationUnchanged(t *testing.T) {
 	}
 }
 
-func TestRetestUpgradesFromNotAssessedAndBlocked(t *testing.T) {
+func TestRetestLeavesNotAssessedAndBlockedUnchanged(t *testing.T) {
 	for _, from := range []string{VerificationNotAssessed, VerificationBlocked} {
 		t.Run(from, func(t *testing.T) {
 			d, fid := retestDB(t)
 			if err := d.SetFindingVerification(fid, from, 0, ""); err != nil {
 				t.Fatal(err)
 			}
-			runRetest(t, d, fid, "reproduced", "reproduced on retest", "completed")
-			if status, _, _ := verificationOf(t, d, fid); status != VerificationVerified {
+			runRetest(t, d, fid, "reproduced", "model says reproduced", "completed")
+			if status, _, _ := verificationOf(t, d, fid); status != from {
 				t.Fatalf("from %s after reproduced: status=%s", from, status)
 			}
 		})

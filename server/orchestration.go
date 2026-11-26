@@ -455,7 +455,7 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			"report":           strParam("full report text, Markdown format"),
 			"evidence_version": map[string]any{"type": "integer", "description": "evidence version returned by get_finding_traffic; prevents the report from overwriting newer evidence changes"},
 			"poe_level":        map[string]any{"type": "integer", "description": "proof-of-exploitation level 0-4: 1 error/timing/response variation, 2 structural manipulation, 3 actual data extracted, 4 critical impact. L3 is the minimum for verified. Omit or 0 when not proven."},
-			"evidence_quotes":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "exact lines copied from a bound proof/verification response body (get_finding_traffic). Never from memory; the server checks each one verbatim after whitespace normalization."},
+			"evidence_quotes":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "exact defect lines, never from memory. For exploitation findings copy them from a bound proof/verification HTTP response. For service findings copy them from signed command output; for browser/routing findings copy them from the signed HAR response. Secret-exposure findings instead use their exact commit/file/secret-hash source capture."},
 		}, "finding_id", "report"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -500,9 +500,10 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			}
 			msg := fmt.Sprintf("finding %d report updated (%d chars)\nverification: %s", nodeID, len(a.Report), status)
 			if status == db.VerificationVerified {
-				msg += fmt.Sprintf(" (POE L%d)", poe)
+				finding, _ := s.m.pg.GetFinding(findingID)
+				msg += artifactVerificationSuccessMessage(findingVerificationProfile(finding), poe)
 			} else {
-				msg += " - " + note + "\nwarning: the report is saved but the finding is not verified. To reach verified, declare poe_level 3 or 4 and pass exact quotes copied from a bound proof/verification response body."
+				msg += " - " + note + "\nwarning: the report is saved but the finding is not verified. Exploitation findings require POE L3/L4 plus exact bound-response quotes; secret, service-scan and browser-routing findings require their class-specific signed artifacts."
 			}
 			return actool.Text(msg), nil
 		})

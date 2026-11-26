@@ -39,6 +39,7 @@ type findingArtifactDTO struct {
 	Truncated       bool      `json:"truncated,omitempty"`
 	Sensitive       bool      `json:"sensitive,omitempty"`
 	ref             string
+	activityDetail  string
 }
 
 func (s *Server) findingArtifacts(id int64) ([]findingArtifactDTO, error) {
@@ -100,6 +101,7 @@ func (s *Server) findingArtifacts(id int64) ([]findingArtifactDTO, error) {
 				Tool: artifact.Tool, Command: artifact.Command, SourceURL: artifact.SourceURL,
 				OriginalName: artifact.OriginalName, RawOutputSHA256: artifact.RawOutputSHA256,
 				Truncated: artifact.Truncated, Sensitive: artifact.Sensitive, ref: artifact.Ref,
+				activityDetail: activity.Detail,
 			})
 		}
 	}
@@ -123,7 +125,7 @@ func validEvidenceArtifact(activity db.Activity, artifact agent.EvidenceArtifact
 	}
 	switch artifact.Kind {
 	case "terminal_capture":
-		if artifact.MIMEType != "image/png" || !shellEvidenceActivityTool(activity.Tool) ||
+		if activity.IsError || artifact.MIMEType != "image/png" || !shellEvidenceActivityTool(activity.Tool) ||
 			!strings.EqualFold(strings.TrimSpace(artifact.Tool), strings.TrimSpace(activity.Tool)) ||
 			strings.TrimSpace(artifact.Command) == "" || len(artifact.RawOutputSHA256) != 64 ||
 			strings.TrimSpace(artifact.SourceURL) != "" {

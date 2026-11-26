@@ -1303,6 +1303,10 @@ CREATE TABLE IF NOT EXISTS finding_retests (
     id BIGSERIAL PRIMARY KEY,
     finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
     conversation_id BIGINT UNIQUE REFERENCES conversations(id) ON DELETE SET NULL,
+    -- Worker follow-up validations are task intents, not chat conversations.  The
+    -- exact intent id is server-owned provenance and lets the Retests UI preserve
+    -- their outcome without inventing a conversation or trusting model-supplied ids.
+    source_intent_id BIGINT UNIQUE REFERENCES exploration_nodes(id) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','completed','failed','stopped')),
     verdict TEXT NOT NULL DEFAULT '' CHECK (verdict IN ('','reproduced','fixed','inconclusive')),
     notes TEXT NOT NULL DEFAULT '',
@@ -1338,6 +1342,19 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_evidence_version BIGINT NOT
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS poe_level SMALLINT NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'unverified';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_note TEXT NOT NULL DEFAULT '';
+
+-- Hash-verified artifacts are immutable evidence revisions. The ledger makes
+-- discovery/reconciliation idempotent: repeated gallery/report reads never
+-- advance evidence_version for the same bytes a second time.
+CREATE TABLE IF NOT EXISTS finding_artifact_evidence (
+    finding_id  BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    sha256      TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+    activity_id BIGINT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (finding_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_finding_artifact_evidence_activity
+    ON finding_artifact_evidence(activity_id);
 -- Reporter-supplied reasoning, both optional (empty = not given): counterevidence is what was
 -- tested and did not work; confidence_rationale is why the conclusion holds.
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS counterevidence TEXT NOT NULL DEFAULT '';
