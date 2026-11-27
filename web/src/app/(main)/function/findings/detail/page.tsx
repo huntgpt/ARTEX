@@ -5,14 +5,13 @@ import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
-import { ArrowLeftIcon, ArrowUpRightIcon, ShieldAlertIcon } from "lucide-react";
+import { ArrowLeftIcon, ArrowUpRightIcon, FileTextIcon, RefreshCwIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
-import { FindingEvidenceArtifacts } from "@/components/finding-evidence-artifacts";
+import { FindingReportWithEvidence } from "@/components/finding-evidence-artifacts";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
-import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -69,6 +68,7 @@ function FindingDetailInner() {
   const [finding, setFinding] = React.useState<Finding | null>(null);
   const [loaded, setLoaded] = React.useState(false);
   const [tab, setTab] = React.useState("overview");
+  const [reportQueued, setReportQueued] = React.useState(false);
 
   const load = React.useCallback(() => {
     if (!id) {
@@ -84,6 +84,36 @@ function FindingDetailInner() {
   React.useEffect(() => {
     load();
   }, [load]);
+
+  React.useEffect(() => {
+    if (!reportQueued || !id) return;
+    const original = finding?.report ?? "";
+    const deadline = Date.now() + 3 * 60 * 1000;
+    const timer = window.setInterval(() => {
+      api
+        .getFinding(id, contextTaskId || undefined)
+        .then((next) => {
+          setFinding(next);
+          if ((next.report ?? "") !== original || Date.now() >= deadline) setReportQueued(false);
+        })
+        .catch(() => {
+          if (Date.now() >= deadline) setReportQueued(false);
+        });
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [contextTaskId, finding?.report, id, reportQueued]);
+
+  const generateReport = React.useCallback(async () => {
+    if (reportQueued || !id) return;
+    setReportQueued(true);
+    try {
+      await api.generateFindingReport(id);
+      toast.success(t("Detailed report queued; this page will update when the Reporter finishes."));
+    } catch (error) {
+      setReportQueued(false);
+      toast.error(t("Failed to queue detailed report: {error}", { error: (error as Error).message }));
+    }
+  }, [id, reportQueued]);
 
   const changeSeverity = React.useCallback(
     async (next: Severity) => {
@@ -152,6 +182,9 @@ function FindingDetailInner() {
   }
 
   const title = finding.name || finding.vulnclass || t("Uncategorized");
+  let reportActionLabel = t("Generate report");
+  if (reportQueued) reportActionLabel = t("Reporter working…");
+  else if (finding.report) reportActionLabel = t("Regenerate report");
 
   return (
     <Tabs value={tab} onValueChange={setTab} className="flex flex-1 flex-col gap-0">
@@ -200,7 +233,6 @@ function FindingDetailInner() {
                 </CardContent>
               </Card>
               <FindingRetestPanel key={id} findingId={id} readOnly={finding.inherited} onCompleted={load} />
-              <FindingEvidenceArtifacts key={`visual-${id}`} findingId={id} />
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">{t("Evidence / PoC")}</CardTitle>
@@ -246,7 +278,17 @@ function FindingDetailInner() {
               <Card>
                 <CardHeader className="flex-row items-center justify-between">
                   <CardTitle className="text-sm">{t("Detailed report")}</CardTitle>
-                  {finding.report && <CopyButton text={finding.report} successMessage={t("Detailed report copied")} />}
+                  <div className="flex items-center gap-2">
+                    {!finding.inherited && finding.status !== "duplicate" && finding.status !== "false_positive" && (
+                      <Button variant="outline" size="sm" disabled={reportQueued} onClick={() => void generateReport()}>
+                        {reportQueued ? <RefreshCwIcon className="animate-spin" /> : <FileTextIcon />}
+                        {reportActionLabel}
+                      </Button>
+                    )}
+                    {finding.report && (
+                      <CopyButton text={finding.report} successMessage={t("Detailed report copied")} />
+                    )}
+                  </div>
                 </CardHeader>
                 <CardContent>
                   {finding.report_stale ? (
@@ -257,9 +299,13 @@ function FindingDetailInner() {
                     </Alert>
                   ) : null}
                   {finding.report ? (
-                    <Markdown text={finding.report} />
+                    <FindingReportWithEvidence findingId={id} text={finding.report} />
                   ) : (
-                    <p className="text-sm text-muted-foreground">{t("No detailed report yet.")}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {reportQueued
+                        ? t("Reporter is gathering evidence and writing this report…")
+                        : t("No detailed report yet.")}
+                    </p>
                   )}
                 </CardContent>
               </Card>

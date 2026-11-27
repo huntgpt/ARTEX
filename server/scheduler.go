@@ -170,8 +170,8 @@ func (sc *Scheduler) fireFindings(triggers []*db.AgentTrigger) {
 		if len(want) == 0 {
 			continue
 		}
-		msgCtx := fmt.Sprintf("\n\n[This run was triggered by a task finding]\nFinding: [%s/%s] %s",
-			e.VulnClass, e.Severity, e.Summary)
+		msgCtx := fmt.Sprintf("\n\n[This run was triggered by a task finding]\nTask: #%d\nExploration node_id: %d\nStandalone finding_id: %d\nFinding: [%s/%s] %s",
+			e.TaskID, e.NodeID, e.FindingID, e.VulnClass, e.Severity, e.Summary)
 		for _, tr := range want {
 			sc.s.StartTriggeredRun(tr.AgentKey, fmt.Sprintf("Finding trigger · task#%d", e.TaskID), tr.FindingMessage+msgCtx, e.TaskID, true, e.TaskDesc, e.TaskGoal)
 		}

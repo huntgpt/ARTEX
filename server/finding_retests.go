@@ -188,6 +188,7 @@ func (s *Server) findingRetestTools() []actool.CoreTool {
 			}),
 		s.toolCaptureRetestPlaywrightEvidence(),
 		s.toolIngestRetestBrowserEvidence(),
+		s.toolValidateRetestDiscoveredSecretSource(),
 	}
 }
 

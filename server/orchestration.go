@@ -80,6 +80,7 @@ func (s *Server) orchestrationTools() []actool.CoreTool {
 		s.toolGetTaskNodeDetail(),
 		s.toolUpdateFindingReport(),
 		s.toolGetFindingTraffic(),
+		s.toolListFindingArtifacts(),
 		s.toolBindFindingTraffic(),
 	}
 }
@@ -568,7 +569,9 @@ func (s *Server) seedOrchestrationTools() {
 	s.reseedPlannerPrompt()           // planner prompt: rewrites the "zero intents" justification rules + adds quantitative acceptance checks (one-time)
 	s.reseedWorkerPrompt()            // worker prompt: adds the evidence bar for negative conclusions (one-time)
 	s.seedReporterAgent()             // seeds the "report writer" agent + tool bindings + finding trigger (one-time)
-	s.upgradeReporterTriggerMessage() // backfill migration for old DBs: makes the reporter send evidence_version back (one-time)
+	s.upgradeReporterTriggerMessage() // migrates the default reporter from tool-call-only to source-agnostic finding events (one-time)
+	s.seedReporterArtifactBinding()   // lets existing reporter agents cite hash-verified images inline (one-time)
+	s.reseedReporterPrompt()          // refreshes the seeded reporter to cite verified images inline (one-time)
 	s.seedFindingTrafficTools()       // adds optional evidence params and read-only evidence tools, preserving user config
 	s.seedFindingWorkflowTools()
 	s.seedFindingVerificationSchema() // S1: poe_level / evidence_quotes on update_finding_report, added once per DB
@@ -879,12 +882,20 @@ const reporterToolCallMessageV1 = "A vulnerability was just registered via repor
 	" (the number in the tool's returned \"finding recorded: <id>\") and the task id, write that vulnerability's detailed report per your duties," +
 	" and finally call update_finding_report(finding_id, report) to save it."
 
+// reporterFindingMessage is used by the source-agnostic finding trigger. Unlike
+// the legacy report_finding tool trigger, this path also covers findings created
+// by imports, verification, migration and dedup workflows.
+const reporterFindingMessage = "A vulnerability record was created. Read Task, exploration node_id, and standalone finding_id from the trigger context. " +
+	"Use the exploration node_id with get_task_node_detail and update_finding_report. Use the standalone finding_id with get_finding_traffic and list_finding_artifacts. " +
+	"Always read the current traffic evidence version before saving. Write the detailed report even when no traffic or screenshot is attached; never invent missing evidence. " +
+	"When a hash-verified terminal or browser image supports a statement, place its marker directly in the relevant report section as ![short evidence caption](artifact://<sha256>)."
+
 // upgradeReporterTriggerMessage refreshes reporter trigger messages that still carry the default copy in old DBs to the new version.
 // seedReporterAgent is guarded by reporter_agent_seed_v1 and only writes the trigger when creating the agent, so
 // upgraded DBs never got the new copy — seedFindingTrafficTools backfilled the tool schema with
 // evidence_version, but nothing told the reporter to use it. One-time, and it only overwrites unmodified copy.
 func (s *Server) upgradeReporterTriggerMessage() {
-	const flag = "reporter_trigger_evidence_version_v1"
+	const flag = "reporter_trigger_on_finding_v2"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -895,16 +906,61 @@ func (s *Server) upgradeReporterTriggerMessage() {
 		return
 	}
 	for _, t := range triggers {
-		if !t.OnToolCall || t.ToolCallMessage != reporterToolCallMessageV1 {
-			continue // user-modified or not a finding trigger — leave it alone.
+		legacyDefault := t.OnToolCall && len(t.ToolNames) == 1 && t.ToolNames[0] == "report_finding" &&
+			(t.ToolCallMessage == reporterToolCallMessageV1 || t.ToolCallMessage == reporterToolCallMessage)
+		if !legacyDefault {
+			continue // user-modified or unrelated trigger — leave it alone.
 		}
-		t.ToolCallMessage = reporterToolCallMessage
+		t.OnToolCall = false
+		t.ToolNames = nil
+		t.ToolCallMessage = ""
+		t.OnFinding = true
+		t.FindingMessage = reporterFindingMessage
 		if err := s.m.pg.UpdateTrigger(t); err != nil {
-			log.Printf("[reporter] failed to upgrade trigger message: %v", err)
+			log.Printf("[reporter] failed to upgrade finding trigger: %v", err)
 			return
 		}
-		log.Printf("[reporter] trigger message upgraded to read and return evidence_version")
+		log.Printf("[reporter] trigger upgraded from report_finding calls to source-agnostic finding events")
 	}
+}
+
+func (s *Server) seedReporterArtifactBinding() {
+	const flag = "reporter_artifact_binding_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	if err := s.m.pg.AddAgentToToolBinding("reporter", []string{"list_finding_artifacts"}); err != nil {
+		log.Printf("[reporter] failed to bind list_finding_artifacts: %v", err)
+		return
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
+}
+
+func (s *Server) reseedReporterPrompt() {
+	const flag = "reporter_prompt_inline_artifacts_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	defer func() { _ = s.m.pg.SetSetting(flag, "true") }()
+	a, err := s.m.pg.GetAgentByKey("reporter")
+	if err != nil || a == nil {
+		return
+	}
+	current, err := s.m.pg.CurrentPrompt(a.ID)
+	if err != nil || current == "" || current == agent.ReporterDefaultPrompt {
+		return
+	}
+	// Preserve prompts the operator customized. This phrase belongs to the
+	// previously seeded default and is intentionally narrow.
+	if !strings.Contains(current, "Whenever a worker registers a vulnerability via report_finding") ||
+		strings.Contains(current, "list_finding_artifacts") {
+		return
+	}
+	if _, err := s.m.pg.ResetPromptToDefault(a.ID, agent.ReporterDefaultPrompt); err != nil {
+		log.Printf("[reporter] failed to refresh default prompt: %v", err)
+		return
+	}
+	log.Printf("[reporter] prompt refreshed to cite hash-verified visual evidence inline")
 }
 
 // seedReporterAgent presets a "report writer" custom agent (builtin=false, editable/deletable in the UI):
@@ -940,18 +996,17 @@ func (s *Server) seedReporterAgent() {
 	if err := s.m.pg.AddAgentToToolBinding("reporter", []string{
 		"update_finding_report", "get_task_node_detail", "list_task_findings",
 		"get_task_worker_trace", "list_task_worker_traces", "search_task_worker_traces",
-		"get_task_graph",
+		"get_task_graph", "get_finding_traffic", "list_finding_artifacts",
 	}); err != nil {
 		log.Printf("[reporter] failed to bind tools: %v", err)
 	}
-	// Trigger: fires whenever report_finding is called (the tool returns "finding recorded: <id>" carrying the finding_id,
-	// and the task id is also in the trigger message).
+	// Trigger: fires for every new finding node, including findings created by
+	// ingestion, migration and verification paths that never call report_finding.
 	if _, err := s.m.pg.CreateTrigger(&db.AgentTrigger{
-		AgentKey:        "reporter",
-		Enabled:         true,
-		OnToolCall:      true,
-		ToolNames:       []string{"report_finding"},
-		ToolCallMessage: reporterToolCallMessage,
+		AgentKey:       "reporter",
+		Enabled:        true,
+		OnFinding:      true,
+		FindingMessage: reporterFindingMessage,
 	}); err != nil {
 		log.Printf("[reporter] failed to create trigger: %v", err)
 	}

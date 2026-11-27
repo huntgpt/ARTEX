@@ -2798,5 +2798,14 @@
   "tool": "araç",
   "Image truncated; raw output retained": "Görüntü kırpıldı; ham çıktı korundu",
   "Verified visual evidence": "Doğrulanmış görsel kanıt",
-  "Evidence images are not available in mock mode": "Kanıt görüntüleri sahte veri modunda kullanılamaz"
+  "Evidence images are not available in mock mode": "Kanıt görüntüleri sahte veri modunda kullanılamaz",
+  "Detailed report queued; this page will update when the Reporter finishes.": "Ayrıntılı rapor sıraya alındı; Reporter tamamlandığında bu sayfa güncellenecek.",
+  "Failed to queue detailed report: {error}": "Ayrıntılı rapor sıraya alınamadı: {error}",
+  "Generate report": "Rapor oluştur",
+  "Reporter working…": "Reporter çalışıyor…",
+  "Regenerate report": "Raporu yeniden oluştur",
+  "Reporter is gathering evidence and writing this report…": "Reporter kanıtları topluyor ve bu raporu yazıyor…",
+  "Hash verified": "Hash doğrulandı",
+  "Visual evidence could not be loaded: {error}": "Görsel kanıt yüklenemedi: {error}",
+  "Referenced evidence image is unavailable or failed integrity validation.": "Başvurulan kanıt görüntüsü kullanılamıyor veya bütünlük doğrulaması başarısız oldu."
 }

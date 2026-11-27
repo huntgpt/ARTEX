@@ -150,6 +150,7 @@ ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, key, value)
 // compose the trigger message context.
 type TaskEvent struct {
 	NodeID     int64  `json:"node_id"`
+	FindingID  int64  `json:"finding_id"` // standalone findings.id; finding events only
 	TaskID     int64  `json:"task_id"`
 	TaskDesc   string `json:"task_description"`
 	TaskGoal   string `json:"task_goal"`
@@ -166,7 +167,9 @@ type TaskEvent struct {
 // ordered by id (monotonic watermark → no double-fire).
 func (d *DB) NewFindingsSince(lastID int64) ([]TaskEvent, error) {
 	rows, err := d.Query(`
-SELECT n.id, t.id, t.description, t.goal, n.payload
+SELECT n.id,
+       COALESCE((SELECT f.id FROM findings f WHERE f.node_id=n.id AND f.task_id=t.id ORDER BY f.id DESC LIMIT 1), 0),
+       t.id, t.description, t.goal, n.payload
 FROM exploration_nodes n JOIN tasks t ON t.exploration_id = n.exploration_id
 WHERE n.kind='finding' AND n.id > $1 AND t.deleted_at IS NULL
 ORDER BY n.id`, lastID)
@@ -178,7 +181,7 @@ ORDER BY n.id`, lastID)
 	for rows.Next() {
 		var e TaskEvent
 		var payload []byte
-		if err := rows.Scan(&e.NodeID, &e.TaskID, &e.TaskDesc, &e.TaskGoal, &payload); err != nil {
+		if err := rows.Scan(&e.NodeID, &e.FindingID, &e.TaskID, &e.TaskDesc, &e.TaskGoal, &payload); err != nil {
 			return nil, err
 		}
 		var p struct{ Summary, Vulnclass, Severity string }

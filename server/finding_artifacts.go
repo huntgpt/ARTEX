@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 type findingArtifactDTO struct {
@@ -233,6 +235,31 @@ func (s *Server) listFindingArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, map[string]any{"items": artifacts})
+}
+
+func (s *Server) toolListFindingArtifacts() actool.CoreTool {
+	return roTool("list_finding_artifacts",
+		"List only hash-verified real terminal captures and browser screenshots attached to one finding. finding_id is the standalone findings-table ID. Use an artifact's sha256 in the detailed report as ![short evidence caption](artifact://<sha256>) so the UI renders the original verified image inline; never invent an artifact ID or describe a screenshot that is absent.",
+		objSchema(map[string]any{
+			"finding_id": strParam("standalone finding record ID"),
+		}, "finding_id"),
+		func(ctx context.Context, input json.RawMessage) (actool.Result, error) {
+			var args struct {
+				FindingID json.RawMessage `json:"finding_id"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			id := parseProfileID(args.FindingID)
+			if err := s.agentFindingTrafficAccess(ctx, id, false); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			artifacts, err := s.findingArtifacts(id)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return jsonResult(map[string]any{"finding_id": id, "items": artifacts})
+		})
 }
 
 func (s *Server) getFindingArtifact(w http.ResponseWriter, r *http.Request) {

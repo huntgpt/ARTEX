@@ -2798,5 +2798,14 @@
   "tool": "工具",
   "Image truncated; raw output retained": "图像已截断；原始输出已保留",
   "Verified visual evidence": "已验证的可视证据",
-  "Evidence images are not available in mock mode": "模拟模式下不提供证据图像"
+  "Evidence images are not available in mock mode": "模拟模式下不提供证据图像",
+  "Detailed report queued; this page will update when the Reporter finishes.": "详细报告已进入队列；Reporter 完成后此页面将自动更新。",
+  "Failed to queue detailed report: {error}": "无法将详细报告加入队列：{error}",
+  "Generate report": "生成报告",
+  "Reporter working…": "Reporter 正在处理…",
+  "Regenerate report": "重新生成报告",
+  "Reporter is gathering evidence and writing this report…": "Reporter 正在收集证据并撰写此报告…",
+  "Hash verified": "哈希已验证",
+  "Visual evidence could not be loaded: {error}": "无法加载可视证据：{error}",
+  "Referenced evidence image is unavailable or failed integrity validation.": "引用的证据图像不可用或未通过完整性验证。"
 }

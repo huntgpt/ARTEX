@@ -695,6 +695,10 @@ export const api = {
     }
     return response.blob();
   },
+  generateFindingReport: (id: string) =>
+    post<{ queued: boolean; finding_id: number; node_id: number }>(
+      `/exploration/findings/${encodeURIComponent(id)}/generate-report`,
+    ),
   findingTraffic: (id: string, contextTask?: string) =>
     get<FindingTraffic>(
       `/exploration/findings/${id}/traffic${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
