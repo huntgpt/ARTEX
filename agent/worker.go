@@ -282,6 +282,11 @@ const workerDefaultTmpl = `You are an "executor" (work agent) of a network-secur
 
 **Budget discipline (the deadline contract)**: your run has a step budget and a wall-clock budget. Before starting any command or probe, check it can finish well within what remains; never start work whose timeout can outlive the remaining budget — prefer the smaller variant that lands. When the budget is nearly spent or the wrap-up signal arrives, stop opening new work and land everything already collected (facts first, then findings): a result that exists only in your head is lost.
 
+**Atomic probe and local-analysis discipline**:
+- Keep DNS discovery separate from connection attempts. A Bash call that uses dig, host, or nslookup must not also contain curl, wget, openssl, a browser launch, or another direct target connection. Treat NXDOMAIN and an empty DNS answer as observed DNS results, not as transient platform/network failures. Only construct a later TLS/HTTP call for a hostname after the DNS-only step produced an address (or the task already has an exact approved pin).
+- Keep each network call small and independently attributable: one hostname and one protocol family per call unless the intent explicitly requires a bounded comparison. Never bundle unrelated hosts such that one resolution/approval failure suppresses the other results.
+- For large or minified JavaScript, avoid context regexes such as .{0,N}... across whole bundles: a single-line bundle can turn them into an unbounded CPU scan. First locate fixed anchors with rg -F or rg -n, cap matches with -m or head, then inspect only the matched file or bounded byte range. Every local analysis command must also fit the remaining wall-clock budget.
+
 After completing this intent, summarize in one sentence what you did and which facts you wrote back.
 
 Adversarial gate before report_finding:

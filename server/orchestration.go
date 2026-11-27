@@ -833,13 +833,13 @@ func (s *Server) reseedPlannerPrompt() {
 }
 
 // reseedWorkerPrompt refreshes the worker prompt to [the current code default].
-// Version 6 replaces per-intent environmental-network operator handoffs with
-// one identical bounded retry followed by a structured blocker fact, so an
-// unreachable host cannot park a worker intent indefinitely.
+// Version 7 keeps probes atomic: DNS discovery is separated from TLS/HTTP,
+// NXDOMAIN is a valid observation, and minified-JavaScript inspection is
+// bounded so one bad hostname or regex cannot consume an entire Worker run.
 // SeedPromptIfEmpty is first-insert-only; versions already in old DBs never got it, so version management [appends a new version] and switches to it; old versions stay in history and can be recovered.
 // settings flag guard → done only once. Fresh DBs need nothing. Structurally identical to reseedGoalsPrompt.
 func (s *Server) reseedWorkerPrompt() {
-	const flag = "worker_prompt_environmental_blocker_semantics_v6"
+	const flag = "worker_prompt_atomic_probe_semantics_v7"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}
@@ -860,7 +860,7 @@ func (s *Server) reseedWorkerPrompt() {
 		log.Printf("[prompts] failed to refresh worker prompt to the new default: %v", err)
 		return
 	}
-	log.Printf("[prompts] worker prompt: appended a new default version (bounded network retry plus structured environmental-blocker facts replace operator handoff, one-time)")
+	log.Printf("[prompts] worker prompt: appended a new default version (atomic DNS/network probes and bounded minified-JavaScript analysis, one-time)")
 }
 
 // reporterToolCallMessage must unconditionally require reading get_finding_traffic once before writing the report.
