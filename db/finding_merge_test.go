@@ -1,9 +1,11 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMergeDuplicateFindingPreservesEvidenceAndAuditRow(t *testing.T) {
@@ -49,6 +51,20 @@ func TestMergeDuplicateFindingPreservesEvidenceAndAuditRow(t *testing.T) {
 	if canonical.FindingID == duplicate.FindingID {
 		t.Fatal("fixture unexpectedly deduplicated before explicit merge")
 	}
+	snapshot := TrafficEvidenceSnapshot{
+		SourceTrafficID: "merge-proof", CapturedAt: time.Now().UnixMilli(),
+		URL: "https://finding-merge.example/proof", Method: "GET", Status: 200,
+		ContentType: "text/plain", ReqHead: "GET /proof HTTP/1.1\r\n", RespHead: "HTTP/1.1 200 OK\r\n",
+		ReqHash: strings.Repeat("a", 64), RespHash: strings.Repeat("b", 64), ReqLen: 0, RespLen: 5,
+	}
+	snapshot.ID = TrafficSnapshotID(snapshot)
+	if err := d.WithEvidenceTx(t.Context(), func(tx *sql.Tx) error {
+		return AddFindingTrafficTx(tx, duplicate.FindingID, []PreparedTrafficEvidence{{
+			Ref: TrafficRef{TrafficID: snapshot.SourceTrafficID, Role: "proof", Note: "merge fixture"}, Snapshot: snapshot,
+		}})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	activityID, err := es.AppendActivity(Activity{
 		NodeID: &followup, Worker: "work#1", Kind: "tool_result", Tool: "Bash",
 		ToolUseID: "merge-artifact", Detail: "signed proof activity",
@@ -69,7 +85,7 @@ func TestMergeDuplicateFindingPreservesEvidenceAndAuditRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AssetsAdded != 1 || result.ArtifactsAdded != 1 || result.EvidenceLinksAdded != 1 {
+	if result.AssetsAdded != 1 || result.TrafficAdded != 1 || result.ArtifactsAdded != 1 || result.EvidenceLinksAdded != 1 {
 		t.Fatalf("merge result=%+v", result)
 	}
 	got, err := d.GetFinding(canonical.FindingID)

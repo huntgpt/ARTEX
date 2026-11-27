@@ -235,16 +235,26 @@ func (d *DB) MergeDuplicateFinding(ctx context.Context, canonicalID, duplicateID
 		if err != nil {
 			return err
 		}
+		type trafficBinding struct{ snapshotID, role, note string }
+		var traffic []trafficBinding
 		for trafficRows.Next() {
-			var snapshotID, role, note string
-			if err := trafficRows.Scan(&snapshotID, &role, &note); err != nil {
+			var binding trafficBinding
+			if err := trafficRows.Scan(&binding.snapshotID, &binding.role, &binding.note); err != nil {
 				trafficRows.Close()
 				return err
 			}
+			traffic = append(traffic, binding)
+		}
+		if err := trafficRows.Close(); err != nil {
+			return err
+		}
+		// database/sql transactions use one connection. Finish and close the
+		// SELECT before issuing INSERTs; interleaving them leaves lib/pq with an
+		// unread result set and surfaces as the misleading driver.ErrBadConn.
+		for _, binding := range traffic {
 			res, err := tx.ExecContext(ctx, `INSERT INTO finding_traffic_bindings(finding_id,snapshot_id,role,note,position)
-				VALUES($1,$2,$3,$4,$5) ON CONFLICT(finding_id,snapshot_id) DO NOTHING`, canonicalID, snapshotID, role, note, nextPosition)
+				VALUES($1,$2,$3,$4,$5) ON CONFLICT(finding_id,snapshot_id) DO NOTHING`, canonicalID, binding.snapshotID, binding.role, binding.note, nextPosition)
 			if err != nil {
-				trafficRows.Close()
 				return err
 			}
 			if n, _ := res.RowsAffected(); n > 0 {
@@ -252,9 +262,6 @@ func (d *DB) MergeDuplicateFinding(ctx context.Context, canonicalID, duplicateID
 				nextPosition++
 				changed = true
 			}
-		}
-		if err := trafficRows.Close(); err != nil {
-			return err
 		}
 
 		// Preserve goal proof continuity before the duplicate is terminalized.
