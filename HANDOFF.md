@@ -1,6 +1,6 @@
 # ARTEX Red-Team Platform Handoff
 
-Snapshot: 2026-11-27 14:20 Asia/Bangkok
+Snapshot: 2026-11-27 14:48 Asia/Bangkok
 
 Repository: `huntgpt/ARTEX`
 
@@ -9,6 +9,16 @@ Branch: `feat/ad-red-team-foundation`
 Code baseline before this handoff: `b8980388326ad14514a290328505a44c364c38c1`
 
 This document is the durable, non-secret handoff for the next operator/agent. Live assessment data remains in ARTEX/PostgreSQL and in the ignored task evidence directories. Do not copy OAuth tokens, passwords, secret values, JWTs, private keys, or raw credential-bearing artifacts into Git.
+
+## Continuation update — 14:48
+
+- Task `326` remains `running`, not paused, with 91 done intents, 5 running intents, and 1 exhausted intent.
+- Findings are now 8 total: 1 high and 7 medium. The additional medium finding is the independently reproduced MS-RPRN print-spooler coercion prerequisite on ITNB671085; no coercion or relay was executed.
+- The current expanded coverage endpoint reports 29/1767 surfaces tested (1.64%) across 1029 scope rows. This denominator includes discovered services/assets and is not comparable to the earlier 7/180 snapshot without qualification.
+- The pinned `20261127130606` BloodHound collection was SHA-256 verified and ingested through audited runs `3`–`6`. The AD API now reports 9,835 entities and 25,884 edges; ARTEX fact `#6641` records the API verification and provenance.
+- Runs `3` (domains), `5` (users), and `6` (computers) are complete. Run `4` (groups) is `partial`: 1,698 records were processed, but 1,544 items exceeded the current parser cap and `truncated=true`.
+- OUs, GPOs, and containers remain unsupported by the current BloodHound JSON parser. Do not claim a complete BloodHound lifecycle or complete AD graph until the group truncation and these collection types are handled and re-verified.
+- `ingest_ad_observation` was temporarily bound to Worker for the audited import and restored to its default unbound state immediately afterward.
 
 ## Start here
 
