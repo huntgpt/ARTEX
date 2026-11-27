@@ -177,7 +177,10 @@ func (d *DB) MergeDuplicateFinding(ctx context.Context, canonicalID, duplicateID
 			JOIN activity a ON a.id=fe.activity_id
 			JOIN exploration_nodes n ON n.id=a.node_id
 			WHERE fe.finding_id=$1 AND a.node_id IS NOT NULL
-			  AND n.exploration_id=$2 AND n.kind='intent'`, duplicateID, canonical.explorationID)
+			  AND n.exploration_id=$2 AND n.kind='intent'
+			  AND NOT EXISTS (SELECT 1 FROM finding_artifact_evidence current
+			                  WHERE current.finding_id=$3 AND current.sha256=fe.sha256)`,
+			duplicateID, canonical.explorationID, canonicalID)
 		if err != nil {
 			return err
 		}

@@ -51,6 +51,22 @@ func TestMergeDuplicateFindingPreservesEvidenceAndAuditRow(t *testing.T) {
 	if canonical.FindingID == duplicate.FindingID {
 		t.Fatal("fixture unexpectedly deduplicated before explicit merge")
 	}
+	// A shared artifact on the canonical producer is already visible through
+	// ordinary ancestor lineage. Trying to add canonical -> producer as a direct
+	// follow-up would create a cycle; the merge must recognize the existing digest
+	// and skip that redundant edge.
+	sharedActivityID, err := es.AppendActivity(Activity{
+		NodeID: &producer, Worker: "work#0", Kind: "tool_result", Tool: "Bash",
+		ToolUseID: "shared-artifact", Detail: "shared signed proof activity",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedDigest := strings.Repeat("d", 64)
+	if _, err := d.Exec(`INSERT INTO finding_artifact_evidence(finding_id,sha256,activity_id) VALUES
+		($1,$3,$4),($2,$3,$4)`, canonical.FindingID, duplicate.FindingID, sharedDigest, sharedActivityID); err != nil {
+		t.Fatal(err)
+	}
 	snapshot := TrafficEvidenceSnapshot{
 		SourceTrafficID: "merge-proof", CapturedAt: time.Now().UnixMilli(),
 		URL: "https://finding-merge.example/proof", Method: "GET", Status: 200,
