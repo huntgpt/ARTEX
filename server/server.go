@@ -904,6 +904,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/{id}/retests", s.listFindingRetests)
 	mux.HandleFunc("GET /api/exploration/findings/retests/active", s.listActiveFindingRetests)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/retests", s.startFindingRetest)
+	mux.HandleFunc("POST /api/exploration/findings/{id}/merge-duplicate", s.mergeDuplicateFinding)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("POST /api/exploration/findings/bulk-status", s.bulkPatchFindingStatus)
 	mux.HandleFunc("POST /api/exploration/findings/bulk-report-state", s.bulkPatchFindingReportState)
@@ -2807,6 +2808,62 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, findingFromDB(f, s.resolveAssetIDs(f.AssetIDs)))
+}
+
+// mergeDuplicateFinding losslessly consolidates a duplicate into the canonical
+// finding identified by {id}. The duplicate row remains available for audit,
+// but its evidence, assets, traffic and verified artifact lineage are attached
+// to the canonical record before its workflow state becomes duplicate.
+func (s *Server) mergeDuplicateFinding(w http.ResponseWriter, r *http.Request) {
+	canonicalID := int64(atoiDefault(r.PathValue("id"), 0))
+	if canonicalID <= 0 {
+		writeErr(w, http.StatusBadRequest, "bad canonical finding id")
+		return
+	}
+	var body struct {
+		DuplicateID                  int64
+		PromoteDuplicatePresentation bool `json:"promote_duplicate_presentation"`
+	}
+	// Accept the API's ordinary string IDs and a numeric duplicate_id for simple
+	// integrations. Decode through RawMessage so either representation is valid.
+	var raw struct {
+		DuplicateID                  json.RawMessage `json:"duplicate_id"`
+		PromoteDuplicatePresentation bool            `json:"promote_duplicate_presentation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	body.DuplicateID = parseProfileID(raw.DuplicateID)
+	body.PromoteDuplicatePresentation = raw.PromoteDuplicatePresentation
+	if body.DuplicateID <= 0 || body.DuplicateID == canonicalID {
+		writeErr(w, http.StatusBadRequest, "duplicate_id must be a different positive finding id")
+		return
+	}
+	result, err := s.m.pg.MergeDuplicateFinding(r.Context(), canonicalID, body.DuplicateID, body.PromoteDuplicatePresentation)
+	if err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	// Re-validate the now-expanded canonical lineage against the actual files.
+	// This is intentionally after the atomic SQL merge: a filesystem failure
+	// cannot roll back the preserved database evidence or unmark the duplicate.
+	if err := s.reconcileFindingArtifactEvidence(r.Context(), canonicalID); err != nil {
+		log.Printf("[finding-merge] canonical %d artifact reconciliation: %v", canonicalID, err)
+	}
+	canonical, err := s.m.pg.GetFinding(canonicalID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if canonical == nil {
+		writeErr(w, http.StatusNotFound, "canonical finding not found after merge")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"merge":     result,
+		"canonical": findingFromDB(canonical, s.resolveAssetIDs(canonical.AssetIDs)),
+	})
 }
 
 // maxBulkFindingStatus caps one bulk status request. The UI acts on a page at a

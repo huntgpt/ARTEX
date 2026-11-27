@@ -40,6 +40,7 @@ import type {
   Finding,
   FindingAssetTree,
   FindingDeepenResponse,
+  FindingDuplicateMergeResult,
   FindingEvidenceArtifact,
   FindingGroupsPage,
   FindingQuery,
@@ -766,6 +767,11 @@ export const api = {
   setFindingStatus: (id: string, status: FindingStatus) => patch<Finding>(`/exploration/findings/${id}`, { status }),
   setFindingReportState: (id: string, report_state: FindingReportState) =>
     patch<Finding>(`/exploration/findings/${id}`, { report_state }),
+  mergeFindingDuplicate: (canonicalId: string, duplicateId: string, promoteDuplicatePresentation = false) =>
+    post<FindingDuplicateMergeResult>(`/exploration/findings/${canonicalId}/merge-duplicate`, {
+      duplicate_id: duplicateId,
+      promote_duplicate_presentation: promoteDuplicatePresentation,
+    }),
   // Bulk triage: one transaction server-side, with a per-id result. Unknown ids
   // come back as found=false instead of failing the whole batch.
   bulkSetFindingStatus: (ids: string[], status: FindingStatus) =>

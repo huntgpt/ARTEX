@@ -675,6 +675,18 @@ export interface Finding {
   ts: string;
 }
 
+export interface FindingDuplicateMergeResult {
+  merge: {
+    canonical_id: string;
+    duplicate_id: string;
+    assets_added: number;
+    traffic_added: number;
+    artifacts_added: number;
+    evidence_links_added: number;
+  };
+  canonical: Finding;
+}
+
 export interface FindingEvidenceArtifact {
   id: string;
   activity_id: number;
