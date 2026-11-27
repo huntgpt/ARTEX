@@ -19,6 +19,7 @@ This document is the durable, non-secret handoff for the next operator/agent. Li
 - Runs `3` (domains), `5` (users), and `6` (computers) are complete. Run `4` (groups) is `partial`: 1,698 records were processed, but 1,544 items exceeded the current parser cap and `truncated=true`.
 - OUs, GPOs, and containers remain unsupported by the current BloodHound JSON parser. Do not claim a complete BloodHound lifecycle or complete AD graph until the group truncation and these collection types are handled and re-verified.
 - `ingest_ad_observation` was temporarily bound to Worker for the audited import and restored to its default unbound state immediately afterward.
+- The branch now contains a parser fix that deduplicates entities and edges before enforcing `MaxItems`, enriches earlier stubs with later full records, and adds OUs, GPOs, containers, `contains`, and `gp_link` parsing. Unit/full-module tests and offline parsing of all seven pinned collection files pass without truncation. The running backend has not been restarted and live runs have not been re-ingested, so the API state above remains authoritative until a controlled reload and audited re-import.
 
 ## Start here
 

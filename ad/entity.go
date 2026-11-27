@@ -43,6 +43,8 @@ const (
 	RelationMemberOf             Relation = "member_of"
 	RelationAdminTo              Relation = "admin_to"
 	RelationHasSession           Relation = "has_session"
+	RelationContains             Relation = "contains"
+	RelationGPLink               Relation = "gp_link"
 	RelationGenericAll           Relation = "generic_all"
 	RelationGenericWrite         Relation = "generic_write"
 	RelationWriteDACL            Relation = "write_dacl"
